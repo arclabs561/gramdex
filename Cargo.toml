@@ -1,0 +1,15 @@
+[package]
+name = "gramdex"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.80"
+license = "MIT OR Apache-2.0"
+description = "k-gram / trigram indexing primitives for approximate string matching."
+publish = true
+readme = "README.md"
+documentation = "https://docs.rs/gramdex"
+keywords = ["string", "similarity", "ngram", "trigram", "search"]
+
+[dependencies]
+thiserror = "2"
+
