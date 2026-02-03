@@ -8,7 +8,10 @@ description = "k-gram / trigram indexing primitives for approximate string match
 publish = true
 readme = "README.md"
 documentation = "https://docs.rs/gramdex"
+repository = "https://github.com/arclabs561/gramdex"
+homepage = "https://github.com/arclabs561/gramdex"
 keywords = ["string", "similarity", "ngram", "trigram", "search"]
+categories = ["text-processing", "algorithms"]
 
 [dependencies]
 thiserror = "2"
