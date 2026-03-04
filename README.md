@@ -1,5 +1,9 @@
 # gramdex
 
+[![crates.io](https://img.shields.io/crates/v/gramdex.svg)](https://crates.io/crates/gramdex)
+[![Documentation](https://docs.rs/gramdex/badge.svg)](https://docs.rs/gramdex)
+[![CI](https://github.com/arclabs561/gramdex/actions/workflows/ci.yml/badge.svg)](https://github.com/arclabs561/gramdex/actions/workflows/ci.yml)
+
 `gramdex` provides small, dependency-light primitives for approximate string matching:
 
 - Unicode-scalar (Rust `char`) \(k\)-gram generation
