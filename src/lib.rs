@@ -52,6 +52,16 @@ impl Default for PlannerConfig {
 }
 
 /// Produce Unicode-scalar k-grams (sliding window over Rust `char`).
+///
+/// # Examples
+///
+/// ```
+/// let grams = gramdex::char_kgrams("hello", 3).unwrap();
+/// assert_eq!(grams, vec!["hel", "ell", "llo"]);
+///
+/// // Short input produces no grams
+/// assert!(gramdex::char_kgrams("hi", 3).unwrap().is_empty());
+/// ```
 pub fn char_kgrams(text: &str, k: usize) -> Result<Vec<String>, Error> {
     if k == 0 {
         return Err(Error::InvalidK);
@@ -68,6 +78,13 @@ pub fn char_kgrams(text: &str, k: usize) -> Result<Vec<String>, Error> {
 }
 
 /// Produce Unicode-scalar trigrams (a convenience wrapper over [`char_kgrams`]).
+///
+/// # Examples
+///
+/// ```
+/// let tris = gramdex::char_trigrams("test");
+/// assert_eq!(tris, vec!["tes", "est"]);
+/// ```
 pub fn char_trigrams(text: &str) -> Vec<String> {
     // k=3 is always valid; avoid exposing Result in the common case.
     char_kgrams(text, 3).expect("k=3 is valid")
@@ -127,6 +144,16 @@ fn set_sizes_inter_union<T: Ord>(mut a: Vec<T>, mut b: Vec<T>) -> (usize, usize)
 /// Convention:
 /// - If both inputs have zero trigrams (length < 3), returns 1.0.
 /// - If only one input has trigrams, returns 0.0.
+///
+/// # Examples
+///
+/// ```
+/// let sim = gramdex::trigram_jaccard("hello", "hello");
+/// assert!((sim - 1.0).abs() < 1e-6);
+///
+/// let sim = gramdex::trigram_jaccard("hello", "world");
+/// assert!(sim < 0.5);
+/// ```
 pub fn trigram_jaccard(a: &str, b: &str) -> f32 {
     let a_tris = char_trigram_tuples(a);
     let b_tris = char_trigram_tuples(b);
@@ -179,6 +206,15 @@ impl GramDex {
     }
 
     /// Insert Unicode-scalar trigrams for a document id.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// let mut ix = gramdex::GramDex::new();
+    /// ix.add_document_trigrams(0, "hello");
+    /// ix.add_document_trigrams(1, "world");
+    /// assert_eq!(ix.num_docs(), 2);
+    /// ```
     pub fn add_document_trigrams(&mut self, doc_id: DocId, text: &str) {
         let grams = char_trigrams(text);
         self.add_document(doc_id, &grams);
@@ -237,6 +273,17 @@ impl GramDex {
     }
 
     /// Convenience: union candidates for Unicode-scalar trigrams of `text`.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// let mut ix = gramdex::GramDex::new();
+    /// ix.add_document_trigrams(0, "hello");
+    /// ix.add_document_trigrams(1, "yellow");
+    ///
+    /// let cands = ix.candidates_union_trigrams("mellow");
+    /// assert!(cands.contains(&1)); // "yellow" shares trigrams with "mellow"
+    /// ```
     pub fn candidates_union_trigrams(&self, text: &str) -> Vec<DocId> {
         let grams = char_trigrams(text);
         self.candidates_union(&grams)
@@ -253,6 +300,19 @@ impl GramDex {
     ///
     /// This is useful for cheap pruning before expensive verification:
     /// `min_shared = 2` often removes many candidates vs plain union.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// let mut ix = gramdex::GramDex::new();
+    /// ix.add_document_trigrams(0, "abcdef");
+    /// ix.add_document_trigrams(1, "abcxyz");
+    ///
+    /// let grams = gramdex::char_trigrams("abcde");
+    /// let scored = ix.candidates_union_scored(&grams);
+    /// // doc 0 shares more trigrams than doc 1
+    /// assert!(scored[0].0 == 0 && scored[0].1 >= 2);
+    /// ```
     pub fn candidates_union_scored(&self, query_grams: &[String]) -> Vec<(DocId, u32)> {
         let mut seen: HashSet<&str> = HashSet::new();
         let mut counts: HashMap<DocId, u32> = HashMap::new();
