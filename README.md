@@ -4,11 +4,7 @@
 [![Documentation](https://docs.rs/gramdex/badge.svg)](https://docs.rs/gramdex)
 [![CI](https://github.com/arclabs561/gramdex/actions/workflows/ci.yml/badge.svg)](https://github.com/arclabs561/gramdex/actions/workflows/ci.yml)
 
-`gramdex` provides small, dependency-light primitives for approximate string matching:
-
-- Unicode-scalar (Rust `char`) \(k\)-gram generation
-- A minimal grams → document-ids index (`GramDex`) for candidate generation
-- An exact (verification) trigram Jaccard helper (`trigram_jaccard`)
+Trigram indexing for approximate string matching.
 
 ## Quickstart
 
