@@ -10,7 +10,7 @@ Trigram indexing for approximate string matching.
 
 ```toml
 [dependencies]
-gramdex = "0.1.0"
+gramdex = "0.1.1"
 ```
 
 ```rust
