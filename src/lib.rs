@@ -35,6 +35,7 @@ pub enum CandidatePlan {
 
 /// Configuration for candidate planning / bailout.
 #[derive(Debug, Clone, Copy)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct PlannerConfig {
     /// If an upper bound on candidates exceeds this ratio of the corpus, bail out.
     pub max_candidate_ratio: f32,
@@ -172,6 +173,7 @@ pub fn trigram_jaccard(a: &str, b: &str) -> f32 {
 
 /// A minimal grams->docs candidate index.
 #[derive(Debug, Default)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct GramDex {
     // gram -> docs containing gram
     grams: HashMap<String, HashSet<DocId>>,

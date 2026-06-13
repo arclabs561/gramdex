@@ -15,6 +15,11 @@ categories = ["text-processing", "algorithms"]
 
 [workspace]
 
+[features]
+# Optional serde derives so a built index can be persisted/reloaded.
+serde = ["dep:serde"]
+
 [dependencies]
 thiserror = "2"
+serde = { version = "1.0", optional = true, features = ["derive"] }
 
