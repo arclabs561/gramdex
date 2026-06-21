@@ -39,6 +39,20 @@ assert_eq!(verified, vec![2]);
 - **Candidate index**: `GramDex` (union candidates, scored candidates, bailout planning)
 - **Verification**: `trigram_jaccard`
 
+## Example
+
+```sh
+cargo run --example candidate_verify_rank
+```
+
+Expected output:
+
+```text
+query: "nearest neighbor"
+doc 3: shared=13, jaccard=0.394, text="nearest neighbour spelling variant"
+doc 0: shared=14, jaccard=0.341, text="vector quantization for nearest neighbor search"
+```
+
 ## Design notes
 
 - This crate focuses on **candidate generation**; you bring your own verification policy.
