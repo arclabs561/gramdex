@@ -4,7 +4,7 @@
 [![Documentation](https://docs.rs/gramdex/badge.svg)](https://docs.rs/gramdex)
 [![CI](https://github.com/arclabs561/gramdex/actions/workflows/ci.yml/badge.svg)](https://github.com/arclabs561/gramdex/actions/workflows/ci.yml)
 
-Trigram indexing for approximate string matching.
+K-gram indexing for approximate string matching.
 
 ## Quickstart
 

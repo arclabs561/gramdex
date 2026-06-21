@@ -2,7 +2,7 @@
 # https://github.com/repository-settings/app
 
 repository:
-  description: "Trigram indexing for approximate string matching"
+  description: "K-gram indexing for approximate string matching"
   homepage: "https://docs.rs/gramdex"
   private: false
   has_issues: true
@@ -15,6 +15,8 @@ repository:
   delete_branch_on_merge: true
 
   topics:
+    - fuzzy-search
     - ngram
     - nlp
     - rust
+    - trigram
