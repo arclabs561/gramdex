@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.1] - 2026-06-26
+
+### Fixed
+
+- `store::UpdatableIndex` caches the per-segment `GramDex` indexes and rebuilds
+  them only on mutation (add/delete/compact), instead of rebuilding every segment
+  on every query.
+
 ## [0.2.0] - 2026-06-26
 
 ### Added
