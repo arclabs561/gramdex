@@ -16,6 +16,10 @@ use std::collections::{HashMap, HashSet};
 /// Document id type.
 pub type DocId = u32;
 
+/// Updatable, durable index backed by segstore (the optional `store` feature).
+#[cfg(feature = "store")]
+pub mod store;
+
 /// Errors for gram indexing.
 #[derive(thiserror::Error, Debug)]
 pub enum Error {
