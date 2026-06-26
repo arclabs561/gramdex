@@ -6,12 +6,14 @@
 //! the index survives a restart.
 //!
 //! Each segment stores the source `(id, text)` pairs; a real `GramDex` over the
-//! live documents of each segment answers a query, and the candidate id sets are
-//! unioned. The gram size `k` is chosen at [`UpdatableIndex::open`] (`k = 3` for
-//! trigrams, larger for stricter matching). gramdex is a candidate generator, so
-//! the result is an unranked id set (verify with [`crate::trigram_jaccard`] or
-//! the bounded planners as usual).
+//! live documents of each segment is built and **cached**, rebuilt only when the
+//! index is mutated (an add that seals a segment, a delete, or a compaction), not
+//! on every query. The small unflushed buffer is built per query. The gram size
+//! `k` is chosen at [`UpdatableIndex::open`] (`k = 3` for trigrams). gramdex is a
+//! candidate generator, so the result is an unranked id set (verify with
+//! [`crate::trigram_jaccard`] or the bounded planners as usual).
 
+use std::cell::RefCell;
 use std::sync::Arc;
 
 use durability::{Directory, PersistenceResult};
@@ -20,7 +22,7 @@ use segstore::{SegmentedStore, Store};
 use crate::GramDex;
 
 /// segstore payload: items are document texts, a segment is a batch of source
-/// texts (the GramDex is rebuilt from them per query).
+/// texts (a `GramDex` is built + cached from them).
 struct GramBacking;
 
 impl Store for GramBacking {
@@ -45,10 +47,18 @@ impl Store for GramBacking {
     }
 }
 
+/// Cached per-segment indexes, valid for a given mutation generation.
+struct Cache {
+    generation: u64,
+    segments: Vec<Option<GramDex>>,
+}
+
 /// An updatable, durable character k-gram fuzzy-match index.
 pub struct UpdatableIndex {
     inner: SegmentedStore<GramBacking>,
     k: usize,
+    generation: u64,
+    cache: RefCell<Cache>,
 }
 
 impl UpdatableIndex {
@@ -63,6 +73,11 @@ impl UpdatableIndex {
         Ok(Self {
             inner: SegmentedStore::open(dir, GramBacking, flush_threshold)?,
             k,
+            generation: 0,
+            cache: RefCell::new(Cache {
+                generation: u64::MAX,
+                segments: Vec::new(),
+            }),
         })
     }
 
@@ -73,17 +88,23 @@ impl UpdatableIndex {
 
     /// Add (or re-add) a document by id.
     pub fn add(&mut self, id: u32, text: impl Into<String>) -> PersistenceResult<()> {
-        self.inner.add(id, text.into())
+        self.inner.add(id, text.into())?;
+        self.generation += 1;
+        Ok(())
     }
 
     /// Tombstone a document.
     pub fn delete(&mut self, id: u32) -> PersistenceResult<()> {
-        self.inner.delete(id)
+        self.inner.delete(id)?;
+        self.generation += 1;
+        Ok(())
     }
 
     /// Merge segments (dropping tombstoned docs) and persist a checkpoint.
     pub fn compact(&mut self) -> PersistenceResult<()> {
-        self.inner.compact()
+        self.inner.compact()?;
+        self.generation += 1;
+        Ok(())
     }
 
     /// Persist a checkpoint without merging.
@@ -92,33 +113,56 @@ impl UpdatableIndex {
     }
 
     /// Candidate document ids whose character `k`-grams overlap `text`, unioned
-    /// over every live document (`k` is the value passed to [`Self::open`]).
+    /// over every live document.
     pub fn candidates(&self, text: &str) -> Vec<u32> {
+        self.refresh_cache();
         let mut out: Vec<u32> = Vec::new();
-        for seg in self.inner.segments() {
-            out.extend(self.candidates_in(seg, text));
+        {
+            let cache = self.cache.borrow();
+            for ix in cache.segments.iter().flatten() {
+                out.extend(
+                    ix.candidates_union_char_kgrams(text, self.k)
+                        .unwrap_or_default(),
+                );
+            }
         }
-        let buffered = self.inner.buffer().to_vec();
-        out.extend(self.candidates_in(&buffered, text));
+        let buffered: Vec<(u32, String)> = self.inner.buffer().to_vec();
+        if let Some(ix) = self.build_live_index(&buffered) {
+            out.extend(
+                ix.candidates_union_char_kgrams(text, self.k)
+                    .unwrap_or_default(),
+            );
+        }
         out.sort_unstable();
         out.dedup();
         out
     }
 
-    fn candidates_in(&self, batch: &[(u32, String)], text: &str) -> Vec<u32> {
+    fn refresh_cache(&self) {
+        let mut cache = self.cache.borrow_mut();
+        if cache.generation == self.generation {
+            return;
+        }
+        cache.segments.clear();
+        for seg in self.inner.segments() {
+            cache.segments.push(self.build_live_index(seg));
+        }
+        cache.generation = self.generation;
+    }
+
+    fn build_live_index(&self, items: &[(u32, String)]) -> Option<GramDex> {
         let mut ix = GramDex::new();
         let mut any = false;
-        for (id, doc) in batch {
+        for (id, doc) in items {
             // Skip docs too short for `k` grams (add_document_char_kgrams errors).
             if self.inner.is_live(id) && ix.add_document_char_kgrams(*id, doc, self.k).is_ok() {
                 any = true;
             }
         }
         if !any {
-            return Vec::new();
+            return None;
         }
-        ix.candidates_union_char_kgrams(text, self.k)
-            .unwrap_or_default()
+        Some(ix)
     }
 }
 
@@ -131,20 +175,20 @@ mod tests {
     fn add_delete_compact_recover_with_configurable_k() {
         let dir = MemoryDirectory::arc();
         {
-            // k = 3 (trigrams).
             let mut store = UpdatableIndex::open(dir.clone(), 2, 3).unwrap();
             store.add(1, "hello").unwrap();
-            store.add(2, "yellow").unwrap(); // flush
-            store.add(3, "mellow").unwrap(); // buffered
+            store.add(2, "yellow").unwrap();
+            store.add(3, "mellow").unwrap();
 
             let c = store.candidates("mellow");
-            assert!(c.contains(&3), "exact match is a candidate");
-            assert!(c.contains(&2), "yellow shares trigrams with mellow");
+            assert!(c.contains(&3) && c.contains(&2));
+            assert_eq!(store.candidates("mellow"), c, "cached query is stable");
 
             store.delete(2).unwrap();
-            let c = store.candidates("mellow");
-            assert!(!c.contains(&2), "deleted doc drops out of candidates");
-            assert!(c.contains(&3));
+            assert!(
+                !store.candidates("mellow").contains(&2),
+                "delete invalidates the cache"
+            );
 
             store.compact().unwrap();
             let c = store.candidates("mellow");
@@ -164,7 +208,6 @@ mod tests {
     #[test]
     fn larger_k_is_stricter() {
         let dir = MemoryDirectory::arc();
-        // k = 5: "mellow" and "yellow" share the 5-gram "ellow", "hello" does not.
         let mut store = UpdatableIndex::open(dir, 4, 5).unwrap();
         store.add(1, "hello").unwrap();
         store.add(2, "yellow").unwrap();
