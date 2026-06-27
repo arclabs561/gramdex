@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.1] - 2026-06-27
+
+### Added
+
+- `store::UpdatableIndex::reclaim(min_live_ratio)` and `space_amplification()`
+  (via the new `Store::live_len`): cheap tombstone reclamation, merging only the
+  delete-heavy segments instead of a full compaction.
+
 ## [0.3.0] - 2026-06-27
 
 ### Changed
