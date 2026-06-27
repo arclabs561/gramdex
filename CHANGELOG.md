@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.3] - 2026-06-27
+
+### Changed
+
+- A `delete` now invalidates only the cached index of the segment that holds the
+  id, not the whole cache, so one delete no longer forces every segment to
+  rebuild on the next query.
+
 ## [0.3.2] - 2026-06-27
 
 ### Added
