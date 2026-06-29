@@ -37,11 +37,11 @@ impl Store for GramBacking {
 
     fn merge_segments(
         &self,
-        segs: &[Vec<(u32, String)>],
+        segs: &[&Vec<(u32, String)>],
         live: &dyn Fn(&u32) -> bool,
     ) -> Vec<(u32, String)> {
         segs.iter()
-            .flatten()
+            .flat_map(|s| s.iter())
             .filter(|(id, _)| live(id))
             .cloned()
             .collect()
@@ -99,6 +99,20 @@ impl UpdatableIndex {
         // A sealed add introduces a new segment (a new Arc identity); existing
         // segments keep theirs, so the cache reuses them and builds only the new one.
         self.inner.add(id, text.into())?;
+        Ok(())
+    }
+
+    /// Add (or re-add) many documents, syncing the write-ahead log once for the
+    /// whole batch instead of once per document. This is the bulk-ingest path (the
+    /// corpus-load phase): per-item WAL sync is the dominant cost on a real disk, so
+    /// one sync per batch is several times faster than a loop of [`Self::add`]. A
+    /// crash mid-batch recovers a consistent prefix (each document is an
+    /// independently CRC-checked WAL record).
+    pub fn extend(
+        &mut self,
+        docs: impl IntoIterator<Item = (u32, String)>,
+    ) -> PersistenceResult<()> {
+        self.inner.extend(docs)?;
         Ok(())
     }
 
