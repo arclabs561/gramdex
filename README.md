@@ -10,7 +10,7 @@ K-gram indexing for approximate string matching.
 
 ```toml
 [dependencies]
-gramdex = "0.1.1"
+gramdex = "0.3.4"
 ```
 
 ```rust
@@ -45,7 +45,7 @@ assert_eq!(verified, vec![2]);
 cargo run --example candidate_verify_rank
 ```
 
-Expected output:
+Output:
 
 ```text
 query: "nearest neighbor"

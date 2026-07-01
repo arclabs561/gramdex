@@ -9,7 +9,8 @@
 //! live documents of each segment is built and **cached**, rebuilt only when the
 //! index is mutated (an add that seals a segment, a delete, or a compaction), not
 //! on every query. The small unflushed buffer is built per query. The gram size
-//! `k` is chosen at [`UpdatableIndex::open`] (`k = 3` for trigrams). gramdex is a
+//! `k` is chosen at [`UpdatableIndex::open`](crate::store::UpdatableIndex::open)
+//! (`k = 3` for trigrams). gramdex is a
 //! candidate generator, so the result is an unranked id set (verify with
 //! [`crate::trigram_jaccard`] or the bounded planners as usual).
 
