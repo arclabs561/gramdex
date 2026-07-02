@@ -6,16 +6,18 @@
 //! the index survives a restart.
 //!
 //! Each segment stores the source `(id, text)` pairs; a real `GramDex` over the
-//! live documents of each segment is built and **cached**, rebuilt only when the
-//! index is mutated (an add that seals a segment, a delete, or a compaction), not
-//! on every query. The small unflushed buffer is built per query. The gram size
-//! `k` is chosen at [`UpdatableIndex::open`](crate::store::UpdatableIndex::open)
-//! (`k = 3` for trigrams). gramdex is a
+//! live documents of each segment is built, cached, and persisted as a
+//! per-segment sidecar. It is rebuilt only when the index is mutated (an add
+//! that seals a segment, a delete, or a compaction), not on every query. The
+//! small unflushed buffer is built per query. The gram size `k` is chosen at
+//! [`UpdatableIndex::open`](crate::store::UpdatableIndex::open) (`k = 3` for
+//! trigrams). gramdex is a
 //! candidate generator, so the result is an unranked id set (verify with
 //! [`crate::trigram_jaccard`] or the bounded planners as usual).
 
 use std::cell::RefCell;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
+use std::io::Read;
 use std::sync::Arc;
 
 use durability::{Directory, PersistenceResult};
@@ -65,11 +67,32 @@ struct Cache {
     by_ptr: HashMap<usize, Option<GramDex>>,
 }
 
+/// The `kind` tag for a persisted per-segment GramDex sidecar.
+const INDEX_KIND: &str = "gramdex";
+const SIDECAR_MAGIC: &[u8; 8] = b"GRDXIDX1";
+const SIDECAR_VERSION: u32 = 1;
+
+#[derive(serde::Serialize)]
+struct GramSidecarRef<'a> {
+    index: &'a GramDex,
+    ids: Vec<u32>,
+}
+
+#[derive(serde::Deserialize)]
+struct GramSidecar {
+    index: GramDex,
+    ids: Vec<u32>,
+}
+
 /// An updatable, durable character k-gram fuzzy-match index.
 pub struct UpdatableIndex {
     inner: SegmentedStore<GramBacking>,
     k: usize,
+    sidecar_recipe: String,
     cache: RefCell<Cache>,
+    /// Segment ids whose on-disk GramDex sidecar was validated or written in
+    /// this process, so checkpoint persistence stays O(new segments).
+    persisted: RefCell<HashSet<u64>>,
 }
 
 impl UpdatableIndex {
@@ -84,9 +107,11 @@ impl UpdatableIndex {
         Ok(Self {
             inner: SegmentedStore::open(dir, GramBacking, flush_threshold)?,
             k,
+            sidecar_recipe: Self::make_sidecar_recipe(k),
             cache: RefCell::new(Cache {
                 by_ptr: HashMap::new(),
             }),
+            persisted: RefCell::new(HashSet::new()),
         })
     }
 
@@ -123,9 +148,15 @@ impl UpdatableIndex {
         // A tombstone only changes the live-set of the segment that holds `id`, so
         // invalidate just that segment's cached index -- not the whole cache.
         let mut cache = self.cache.borrow_mut();
-        for seg in self.inner.segments() {
+        for (seg_idx, seg) in self.inner.segments().iter().enumerate() {
             if seg.iter().any(|(sid, _)| *sid == id) {
                 cache.by_ptr.remove(&(Arc::as_ptr(seg) as usize));
+                let seg_id = self.inner.segment_ids()[seg_idx];
+                self.persisted.borrow_mut().remove(&seg_id);
+                let _ = self
+                    .inner
+                    .dir()
+                    .delete(&self.inner.index_name(seg_id, INDEX_KIND));
             }
         }
         Ok(())
@@ -134,18 +165,24 @@ impl UpdatableIndex {
     /// Merge segments (dropping tombstoned docs) and persist a checkpoint.
     pub fn compact(&mut self) -> PersistenceResult<()> {
         self.inner.compact()?;
+        self.persist_new_segments();
         Ok(())
     }
 
     /// Persist a checkpoint without merging.
     pub fn checkpoint(&mut self) -> PersistenceResult<()> {
-        self.inner.checkpoint()
+        self.inner.checkpoint()?;
+        self.persist_new_segments();
+        Ok(())
     }
 
     /// Run one round of size-tiered compaction, merging similarly-sized segments
     /// so the segment count stays bounded without a full [`compact`](Self::compact).
     pub fn compact_tiers(&mut self) -> PersistenceResult<()> {
-        self.inner.compact_tiers()?;
+        let stats = self.inner.compact_tiers()?;
+        if stats.merges > 0 {
+            self.persist_new_segments();
+        }
         Ok(())
     }
 
@@ -153,7 +190,10 @@ impl UpdatableIndex {
     /// reclaiming tombstoned documents -- the cheap alternative to a full
     /// [`compact`](Self::compact) when a few segments are delete-heavy.
     pub fn reclaim(&mut self, min_live_ratio: f64) -> PersistenceResult<()> {
-        self.inner.reclaim_tombstones(min_live_ratio)?;
+        let stats = self.inner.reclaim_tombstones(min_live_ratio)?;
+        if stats.merges > 0 {
+            self.persist_new_segments();
+        }
         Ok(())
     }
 
@@ -175,12 +215,14 @@ impl UpdatableIndex {
                 segs.iter().map(|a| Arc::as_ptr(a) as usize).collect();
             cache.by_ptr.retain(|key, _| current.contains(key));
             // Build only segments not already cached (i.e. new ones).
-            for seg in segs {
+            let ids = self.inner.segment_ids();
+            for (i, seg) in segs.iter().enumerate() {
                 let key = Arc::as_ptr(seg) as usize;
+                let seg_id = ids[i];
                 cache
                     .by_ptr
                     .entry(key)
-                    .or_insert_with(|| self.build_live_index(&seg[..]));
+                    .or_insert_with(|| self.build_or_load(&seg[..], seg_id));
             }
             for ix in cache.by_ptr.values().flatten() {
                 out.extend(
@@ -215,6 +257,134 @@ impl UpdatableIndex {
         }
         Some(ix)
     }
+
+    /// Load segment `seg_id`'s persisted GramDex sidecar, or build it over the
+    /// segment's live documents and persist it for the next restart.
+    fn build_or_load(&self, seg: &[(u32, String)], seg_id: u64) -> Option<GramDex> {
+        if let Some(index) = self.load_sidecar(seg, seg_id) {
+            self.persisted.borrow_mut().insert(seg_id);
+            return Some(index);
+        }
+        let index = self.build_live_index(seg)?;
+        self.persist_sidecar(&index, seg, seg_id);
+        Some(index)
+    }
+
+    /// Load a sidecar only if its recipe and live id set match the current
+    /// segment. A stale sidecar can never serve a tombstoned document.
+    fn load_sidecar(&self, seg: &[(u32, String)], seg_id: u64) -> Option<GramDex> {
+        let name = self.inner.index_name(seg_id, INDEX_KIND);
+        if !self.inner.dir().exists(&name) {
+            return None;
+        }
+        let mut bytes = Vec::new();
+        self.inner
+            .dir()
+            .open_file(&name)
+            .ok()?
+            .read_to_end(&mut bytes)
+            .ok()?;
+        let index_bytes = self.decode_sidecar(&bytes)?;
+        let mut sidecar: GramSidecar = postcard::from_bytes(index_bytes).ok()?;
+        sidecar.ids.sort_unstable();
+        sidecar.ids.dedup();
+        if sidecar.ids == self.live_ids_vec(seg) {
+            Some(sidecar.index)
+        } else {
+            None
+        }
+    }
+
+    /// Persist a built per-segment GramDex as its sidecar. Best-effort: a failed
+    /// write leaves the in-memory index usable and simply rebuilds later.
+    fn persist_sidecar(&self, index: &GramDex, seg: &[(u32, String)], seg_id: u64) {
+        let sidecar = GramSidecarRef {
+            index,
+            ids: self.live_ids_vec(seg),
+        };
+        if let Ok(index_bytes) = postcard::to_allocvec(&sidecar) {
+            let Some(bytes) = self.encode_sidecar(&index_bytes) else {
+                return;
+            };
+            if self
+                .inner
+                .dir()
+                .atomic_write(&self.inner.index_name(seg_id, INDEX_KIND), &bytes)
+                .is_ok()
+            {
+                self.persisted.borrow_mut().insert(seg_id);
+            }
+        }
+    }
+
+    fn live_ids_vec(&self, seg: &[(u32, String)]) -> Vec<u32> {
+        let mut ids: Vec<u32> = seg
+            .iter()
+            .filter_map(|(id, _)| self.inner.is_live(id).then_some(*id))
+            .collect();
+        ids.sort_unstable();
+        ids
+    }
+
+    fn make_sidecar_recipe(k: usize) -> String {
+        format!("gramdex-store-v1;codec=postcard-gramdex-v1;k={k}")
+    }
+
+    fn encode_sidecar(&self, index: &[u8]) -> Option<Vec<u8>> {
+        let recipe = self.sidecar_recipe.as_bytes();
+        let recipe_len = u32::try_from(recipe.len()).ok()?;
+        let mut bytes = Vec::with_capacity(16 + recipe.len() + index.len());
+        bytes.extend_from_slice(SIDECAR_MAGIC);
+        bytes.extend_from_slice(&SIDECAR_VERSION.to_le_bytes());
+        bytes.extend_from_slice(&recipe_len.to_le_bytes());
+        bytes.extend_from_slice(recipe);
+        bytes.extend_from_slice(index);
+        Some(bytes)
+    }
+
+    fn decode_sidecar<'a>(&self, bytes: &'a [u8]) -> Option<&'a [u8]> {
+        if bytes.len() < 16 {
+            return None;
+        }
+        if &bytes[..8] != SIDECAR_MAGIC {
+            return None;
+        }
+        let version = u32::from_le_bytes(bytes[8..12].try_into().ok()?);
+        if version != SIDECAR_VERSION {
+            return None;
+        }
+        let recipe_len = u32::from_le_bytes(bytes[12..16].try_into().ok()?) as usize;
+        let recipe_start = 16usize;
+        let recipe_end = recipe_start.checked_add(recipe_len)?;
+        if bytes.len() < recipe_end {
+            return None;
+        }
+        if &bytes[recipe_start..recipe_end] != self.sidecar_recipe.as_bytes() {
+            return None;
+        }
+        Some(&bytes[recipe_end..])
+    }
+
+    /// Persist sidecars for sealed segments that lack a current one. This is
+    /// incremental: already validated/written segment ids are skipped.
+    fn persist_new_segments(&self) {
+        let ids = self.inner.segment_ids();
+        let id_set: HashSet<u64> = ids.iter().copied().collect();
+        self.persisted.borrow_mut().retain(|id| id_set.contains(id));
+        for (i, seg) in self.inner.segments().iter().enumerate() {
+            let seg_id = ids[i];
+            if self.persisted.borrow().contains(&seg_id) {
+                continue;
+            }
+            if self.load_sidecar(&seg[..], seg_id).is_some() {
+                self.persisted.borrow_mut().insert(seg_id);
+                continue;
+            }
+            if let Some(index) = self.build_live_index(&seg[..]) {
+                self.persist_sidecar(&index, &seg[..], seg_id);
+            }
+        }
+    }
 }
 
 #[cfg(test)]
@@ -222,14 +392,41 @@ mod tests {
     use super::*;
     use durability::MemoryDirectory;
 
+    const A: &str = "hello";
+    const B: &str = "yellow";
+    const C: &str = "mellow";
+    const D: &str = "a separate unrelated document";
+
+    fn read_file(dir: &Arc<dyn Directory>, name: &str) -> Vec<u8> {
+        let mut bytes = Vec::new();
+        dir.open_file(name)
+            .unwrap()
+            .read_to_end(&mut bytes)
+            .unwrap();
+        bytes
+    }
+
+    fn checkpointed_store(dir: Arc<dyn Directory>, k: usize) -> (String, Vec<u8>) {
+        let mut store = UpdatableIndex::open(dir, 2, k).unwrap();
+        store.add(1, A).unwrap();
+        store.add(2, B).unwrap();
+        store.add(3, C).unwrap();
+        store.add(4, D).unwrap();
+        store.checkpoint().unwrap();
+        let seg_id = store.inner.segment_ids()[0];
+        let name = store.inner.index_name(seg_id, INDEX_KIND);
+        let bytes = read_file(store.inner.dir(), &name);
+        (name, bytes)
+    }
+
     #[test]
     fn add_delete_compact_recover_with_configurable_k() {
         let dir = MemoryDirectory::arc();
         {
             let mut store = UpdatableIndex::open(dir.clone(), 2, 3).unwrap();
-            store.add(1, "hello").unwrap();
-            store.add(2, "yellow").unwrap();
-            store.add(3, "mellow").unwrap();
+            store.add(1, A).unwrap();
+            store.add(2, B).unwrap();
+            store.add(3, C).unwrap();
 
             let c = store.candidates("mellow");
             assert!(c.contains(&3) && c.contains(&2));
@@ -260,10 +457,165 @@ mod tests {
     fn larger_k_is_stricter() {
         let dir = MemoryDirectory::arc();
         let mut store = UpdatableIndex::open(dir, 4, 5).unwrap();
-        store.add(1, "hello").unwrap();
-        store.add(2, "yellow").unwrap();
+        store.add(1, A).unwrap();
+        store.add(2, B).unwrap();
         let c = store.candidates("mellow");
         assert!(c.contains(&2), "yellow shares the 5-gram ellow");
         assert!(!c.contains(&1), "hello shares no 5-gram with mellow at k=5");
+    }
+
+    #[test]
+    fn checkpoint_persists_sidecars_and_reopen_loads_them() {
+        let dir = MemoryDirectory::arc();
+        {
+            let mut store = UpdatableIndex::open(dir.clone(), 2, 3).unwrap();
+            store.add(1, A).unwrap();
+            store.add(2, B).unwrap();
+            store.add(3, C).unwrap();
+            store.add(4, D).unwrap();
+            store.checkpoint().unwrap();
+
+            let ids: Vec<u64> = store.inner.segment_ids().to_vec();
+            assert!(
+                !ids.is_empty(),
+                "4 docs at flush 2 seal at least one segment"
+            );
+            for id in &ids {
+                assert!(
+                    store
+                        .inner
+                        .dir()
+                        .exists(&store.inner.index_name(*id, INDEX_KIND)),
+                    "segment {id} must have a persisted sidecar after checkpoint"
+                );
+            }
+        }
+
+        let store = UpdatableIndex::open(dir, 2, 3).unwrap();
+        let c = store.candidates(C);
+        assert!(
+            c.contains(&2) && c.contains(&3),
+            "search over loaded sidecars returns k-gram candidates"
+        );
+    }
+
+    #[test]
+    fn gramdex_sidecar_recipe_mismatch_rebuilds() {
+        let dir = MemoryDirectory::arc();
+        let (name, before) = checkpointed_store(dir.clone(), 3);
+        assert_eq!(
+            &before[..SIDECAR_MAGIC.len()],
+            SIDECAR_MAGIC,
+            "new sidecars carry the gramdex envelope"
+        );
+
+        let store = UpdatableIndex::open(dir.clone(), 2, 4).unwrap();
+        let seg_id = store.inner.segment_ids()[0];
+        assert!(
+            store
+                .load_sidecar(&store.inner.segments()[0][..], seg_id)
+                .is_none(),
+            "sidecar built with k=3 must not load under k=4"
+        );
+        assert!(
+            !store.candidates(C).is_empty(),
+            "mismatched sidecar falls back to rebuild"
+        );
+
+        let after = read_file(store.inner.dir(), &name);
+        assert_ne!(before, after, "rebuild overwrites the stale-recipe sidecar");
+        assert!(
+            store
+                .load_sidecar(&store.inner.segments()[0][..], seg_id)
+                .is_some(),
+            "rebuilt sidecar now matches the current recipe"
+        );
+    }
+
+    #[test]
+    fn gramdex_sidecar_envelope_rejects_corrupt_headers() {
+        let store = UpdatableIndex::open(MemoryDirectory::arc(), 2, 3).unwrap();
+        let index = b"index-bytes";
+        let bytes = store.encode_sidecar(index).unwrap();
+        assert_eq!(store.decode_sidecar(&bytes), Some(index.as_slice()));
+
+        assert!(store.decode_sidecar(&bytes[..8]).is_none());
+
+        let mut bad_magic = bytes.clone();
+        bad_magic[0] ^= 0xFF;
+        assert!(store.decode_sidecar(&bad_magic).is_none());
+
+        let mut bad_version = bytes.clone();
+        bad_version[8..12].copy_from_slice(&(SIDECAR_VERSION + 1).to_le_bytes());
+        assert!(store.decode_sidecar(&bad_version).is_none());
+
+        let mut bad_recipe_len = bytes.clone();
+        bad_recipe_len[12..16].copy_from_slice(&u32::MAX.to_le_bytes());
+        assert!(store.decode_sidecar(&bad_recipe_len).is_none());
+
+        let mut bad_recipe = bytes.clone();
+        bad_recipe[16] ^= 0x01;
+        assert!(store.decode_sidecar(&bad_recipe).is_none());
+    }
+
+    #[test]
+    fn gramdex_sidecar_invalid_payload_rebuilds() {
+        let dir = MemoryDirectory::arc();
+        let (name, _) = checkpointed_store(dir.clone(), 3);
+        {
+            let store = UpdatableIndex::open(dir.clone(), 2, 3).unwrap();
+            let corrupt = store.encode_sidecar(b"not-a-postcard-gramdex").unwrap();
+            store.inner.dir().atomic_write(&name, &corrupt).unwrap();
+        }
+
+        let store = UpdatableIndex::open(dir.clone(), 2, 3).unwrap();
+        let seg_id = store.inner.segment_ids()[0];
+        assert!(
+            store
+                .load_sidecar(&store.inner.segments()[0][..], seg_id)
+                .is_none(),
+            "valid envelope with invalid GramDex payload is rejected"
+        );
+        assert!(
+            !store.candidates(C).is_empty(),
+            "invalid payload falls back to rebuild"
+        );
+        assert!(
+            store
+                .load_sidecar(&store.inner.segments()[0][..], seg_id)
+                .is_some(),
+            "rebuilt sidecar loads after the fallback"
+        );
+    }
+
+    #[test]
+    fn deleted_id_does_not_resurface_through_a_stale_sidecar() {
+        let dir = MemoryDirectory::arc();
+        let (name, stale_sidecar) = checkpointed_store(dir.clone(), 3);
+        {
+            let mut store = UpdatableIndex::open(dir.clone(), 2, 3).unwrap();
+            store.delete(2).unwrap();
+            store.checkpoint().unwrap();
+            store
+                .inner
+                .dir()
+                .atomic_write(&name, &stale_sidecar)
+                .unwrap();
+        }
+
+        let store = UpdatableIndex::open(dir, 2, 3).unwrap();
+        let seg_id = store.inner.segment_ids()[0];
+        assert!(
+            store
+                .load_sidecar(&store.inner.segments()[0][..], seg_id)
+                .is_none(),
+            "stale sidecar id set is rejected"
+        );
+        let c = store.candidates(C);
+        assert!(
+            !c.contains(&2),
+            "deleted id 2 must not resurface from a stale sidecar"
+        );
+        assert!(c.contains(&3), "live candidate should remain searchable");
     }
 }

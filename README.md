@@ -63,8 +63,10 @@ doc 0: shared=14, jaccard=0.341, text="vector quantization for nearest neighbor 
 `store::UpdatableIndex` wraps the index in a durable, segmented store
 ([`segstore`](https://crates.io/crates/segstore)): incremental add/delete, a
 write-ahead log, checkpoint, compaction, and crash recovery, with the gram size
-`k` chosen at `open`. Per-segment indexes are cached and rebuilt only on
-mutation, not per query. Opt-in; the default build does not depend on segstore.
+`k` chosen at `open`. Per-segment indexes are cached and persisted as sidecars,
+so unchanged segments can load their built `GramDex` blocks after a restart
+instead of rebuilding them. Opt-in; the default build does not depend on
+segstore.
 
 ## License
 

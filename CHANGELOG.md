@@ -5,6 +5,24 @@ All notable changes to this project are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- The `store` feature now persists per-segment `GramDex` sidecars containing
+  the built k-gram index plus live id set. Reopening an unchanged segment can
+  load the sidecar instead of rebuilding its index; stale recipes, corrupt
+  payloads, and stale live-id sets are rejected and rebuilt.
+- Store benchmarks now measure cold sidecar loading separately from cold
+  rebuilding when sidecars are missing or stale. On the synthetic 20k-doc
+  benchmark (`FLUSH=2_000`), cold sidecar load measured ~24.9 ms versus ~90.7
+  ms for rebuilding missing sidecars.
+
+### Changed
+
+- The `store` feature now requires `segstore = "0.4"` and `postcard`. This
+  remains fully optional; default builds do not depend on the storage stack.
+
 ## [0.3.4] - 2026-06-28
 
 ### Added
