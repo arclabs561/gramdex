@@ -68,6 +68,8 @@ so unchanged segments can load their built `GramDex` blocks after a restart
 instead of rebuilding them. Opt-in; the default build does not depend on
 segstore. The source text batches are still loaded by the current `segstore`
 open path; the sidecars avoid rebuilding gram indexes.
+`candidates_min_shared` exposes the same shared-gram pruning as the in-memory
+index for durable stores.
 
 ## License
 

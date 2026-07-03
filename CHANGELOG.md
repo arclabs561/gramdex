@@ -17,6 +17,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Added `store::UpdatableIndex::candidates_min_shared`, exposing shared-gram
+  candidate pruning through the durable store wrapper.
 - The `store` feature now persists per-segment `GramDex` sidecars containing
   the built k-gram index plus live id set. Reopening an unchanged segment can
   load the sidecar instead of rebuilding its index; stale recipes, corrupt

@@ -209,6 +209,27 @@ impl UpdatableIndex {
     /// over every live document.
     pub fn candidates(&self, text: &str) -> Vec<u32> {
         let query_grams = char_kgrams(text, self.k).unwrap_or_default();
+        self.candidates_from_grams(&query_grams, |ix, grams| ix.candidates_union(grams))
+    }
+
+    /// Candidate document ids that share at least `min_shared` distinct
+    /// character `k`-grams with `text`.
+    ///
+    /// This is a cheaper pre-verification filter than the plain union path for
+    /// broad fuzzy-match queries. `min_shared <= 1` is equivalent to
+    /// [`Self::candidates`].
+    pub fn candidates_min_shared(&self, text: &str, min_shared: u32) -> Vec<u32> {
+        let query_grams = char_kgrams(text, self.k).unwrap_or_default();
+        self.candidates_from_grams(&query_grams, |ix, grams| {
+            ix.candidates_union_min_shared(grams, min_shared)
+        })
+    }
+
+    fn candidates_from_grams(
+        &self,
+        query_grams: &[String],
+        mut per_segment: impl FnMut(&GramDex, &[String]) -> Vec<u32>,
+    ) -> Vec<u32> {
         let mut out: Vec<u32> = Vec::new();
         {
             let segs = self.inner.segments();
@@ -223,13 +244,13 @@ impl UpdatableIndex {
                     .entry(seg_id)
                     .or_insert_with(|| self.build_or_load(&seg[..], seg_id));
                 if let Some(ix) = index {
-                    out.extend(ix.candidates_union(&query_grams));
+                    out.extend(per_segment(ix, query_grams));
                 }
             }
         }
         let buffered: Vec<(u32, String)> = self.inner.buffer().to_vec();
         if let Some(ix) = self.build_live_index(&buffered) {
-            out.extend(ix.candidates_union(&query_grams));
+            out.extend(per_segment(&ix, query_grams));
         }
         out.sort_unstable();
         out.dedup();
@@ -463,6 +484,28 @@ mod tests {
         let c = store.candidates("mellow");
         assert!(c.contains(&2), "yellow shares the 5-gram ellow");
         assert!(!c.contains(&1), "hello shares no 5-gram with mellow at k=5");
+    }
+
+    #[test]
+    fn candidates_min_shared_filters_weak_store_candidates() {
+        let dir = MemoryDirectory::arc();
+        {
+            let mut store = UpdatableIndex::open(dir.clone(), 2, 3).unwrap();
+            store.add(1, A).unwrap();
+            store.add(2, B).unwrap();
+            store.add(3, C).unwrap();
+            store.add(4, D).unwrap();
+
+            assert_eq!(store.candidates("mellow"), vec![1, 2, 3]);
+            assert_eq!(store.candidates_min_shared("mellow", 1), vec![1, 2, 3]);
+            assert_eq!(store.candidates_min_shared("mellow", 3), vec![2, 3]);
+
+            store.delete(2).unwrap();
+            store.checkpoint().unwrap();
+        }
+
+        let store = UpdatableIndex::open(dir, 2, 3).unwrap();
+        assert_eq!(store.candidates_min_shared("mellow", 3), vec![3]);
     }
 
     #[test]
