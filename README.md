@@ -66,7 +66,8 @@ write-ahead log, checkpoint, compaction, and crash recovery, with the gram size
 `k` chosen at `open`. Per-segment indexes are cached and persisted as sidecars,
 so unchanged segments can load their built `GramDex` blocks after a restart
 instead of rebuilding them. Opt-in; the default build does not depend on
-segstore.
+segstore. The source text batches are still loaded by the current `segstore`
+open path; the sidecars avoid rebuilding gram indexes.
 
 ## License
 
