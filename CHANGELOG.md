@@ -12,6 +12,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `store::UpdatableIndex` now keys its in-memory per-segment `GramDex` cache by
   segstore's stable segment ids instead of `Arc` pointers, and prunes stale cache
   entries when compaction/reclaim changes the segment set.
+- `store::UpdatableIndex::candidates` now builds query k-grams once per search
+  instead of once per sealed segment, reducing warm multi-segment query latency.
 
 ### Added
 

@@ -23,7 +23,7 @@ use std::sync::Arc;
 use durability::{Directory, PersistenceResult};
 use segstore::{SegmentedStore, Store};
 
-use crate::GramDex;
+use crate::{char_kgrams, GramDex};
 
 /// segstore payload: items are document texts, a segment is a batch of source
 /// texts (a `GramDex` is built + cached from them).
@@ -208,6 +208,7 @@ impl UpdatableIndex {
     /// Candidate document ids whose character `k`-grams overlap `text`, unioned
     /// over every live document.
     pub fn candidates(&self, text: &str) -> Vec<u32> {
+        let query_grams = char_kgrams(text, self.k).unwrap_or_default();
         let mut out: Vec<u32> = Vec::new();
         {
             let segs = self.inner.segments();
@@ -222,19 +223,13 @@ impl UpdatableIndex {
                     .entry(seg_id)
                     .or_insert_with(|| self.build_or_load(&seg[..], seg_id));
                 if let Some(ix) = index {
-                    out.extend(
-                        ix.candidates_union_char_kgrams(text, self.k)
-                            .unwrap_or_default(),
-                    );
+                    out.extend(ix.candidates_union(&query_grams));
                 }
             }
         }
         let buffered: Vec<(u32, String)> = self.inner.buffer().to_vec();
         if let Some(ix) = self.build_live_index(&buffered) {
-            out.extend(
-                ix.candidates_union_char_kgrams(text, self.k)
-                    .unwrap_or_default(),
-            );
+            out.extend(ix.candidates_union(&query_grams));
         }
         out.sort_unstable();
         out.dedup();
