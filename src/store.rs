@@ -248,8 +248,8 @@ impl UpdatableIndex {
                 }
             }
         }
-        let buffered: Vec<(u32, String)> = self.inner.buffer().to_vec();
-        if let Some(ix) = self.build_live_index(&buffered) {
+        let buffered = self.inner.buffer();
+        if let Some(ix) = self.build_live_index(buffered) {
             out.extend(per_segment(&ix, query_grams));
         }
         out.sort_unstable();

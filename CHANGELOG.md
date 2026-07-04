@@ -14,6 +14,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   entries when compaction/reclaim changes the segment set.
 - `store::UpdatableIndex::candidates` now builds query k-grams once per search
   instead of once per sealed segment, reducing warm multi-segment query latency.
+- Store writer searches now build the temporary writer-buffer index from the
+  buffer slice instead of cloning buffered strings first.
 
 ### Added
 
