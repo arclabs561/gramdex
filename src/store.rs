@@ -7,21 +7,22 @@
 //!
 //! Each segment stores the source `(id, text)` pairs; a real `GramDex` over the
 //! live documents of each segment is built, cached, and persisted as a
-//! per-segment sidecar. It is rebuilt only when the index is mutated (an add
-//! that seals a segment, a delete, or a compaction), not on every query. The
-//! small unflushed buffer is built per query. The gram size `k` is chosen at
-//! [`UpdatableIndex::open`](crate::store::UpdatableIndex::open) (`k = 3` for
-//! trigrams). gramdex is a
-//! candidate generator, so the result is an unranked id set (verify with
-//! [`crate::trigram_jaccard`] or the bounded planners as usual).
+//! per-segment sidecar. [`crate::store::UpdatableIndex`] keeps the writer path
+//! simple and loads source segments on open; [`crate::store::SnapshotIndex`] is
+//! the read-only restart path that opens only the segstore manifest and uses
+//! sidecars first, decoding a source segment only when its sidecar is missing or
+//! unusable. The gram size `k` is chosen at open (`k = 3` for trigrams).
+//! gramdex is a candidate generator, so the result is an unranked id set (verify
+//! with [`crate::trigram_jaccard`] or the bounded planners as usual).
 
 use std::cell::RefCell;
+use std::collections::hash_map::Entry;
 use std::collections::{HashMap, HashSet};
 use std::io::Read;
 use std::sync::Arc;
 
 use durability::{Directory, PersistenceResult};
-use segstore::{SegmentedStore, Store};
+use segstore::{SegmentCatalog, SegmentedStore, Store};
 
 use crate::{char_kgrams, GramDex};
 
@@ -83,6 +84,64 @@ struct GramSidecar {
     ids: Vec<u32>,
 }
 
+fn make_sidecar_recipe(k: usize) -> String {
+    format!("gramdex-store-v1;codec=postcard-gramdex-v1;k={k}")
+}
+
+fn encode_sidecar(recipe: &str, index: &[u8]) -> Option<Vec<u8>> {
+    let recipe = recipe.as_bytes();
+    let recipe_len = u32::try_from(recipe.len()).ok()?;
+    let mut bytes = Vec::with_capacity(16 + recipe.len() + index.len());
+    bytes.extend_from_slice(SIDECAR_MAGIC);
+    bytes.extend_from_slice(&SIDECAR_VERSION.to_le_bytes());
+    bytes.extend_from_slice(&recipe_len.to_le_bytes());
+    bytes.extend_from_slice(recipe);
+    bytes.extend_from_slice(index);
+    Some(bytes)
+}
+
+fn decode_sidecar<'a>(recipe: &str, bytes: &'a [u8]) -> Option<&'a [u8]> {
+    if bytes.len() < 16 {
+        return None;
+    }
+    if &bytes[..8] != SIDECAR_MAGIC {
+        return None;
+    }
+    let version = u32::from_le_bytes(bytes[8..12].try_into().ok()?);
+    if version != SIDECAR_VERSION {
+        return None;
+    }
+    let recipe_len = u32::from_le_bytes(bytes[12..16].try_into().ok()?) as usize;
+    let recipe_start = 16usize;
+    let recipe_end = recipe_start.checked_add(recipe_len)?;
+    if bytes.len() < recipe_end {
+        return None;
+    }
+    if &bytes[recipe_start..recipe_end] != recipe.as_bytes() {
+        return None;
+    }
+    Some(&bytes[recipe_end..])
+}
+
+fn build_index_from_items(
+    items: &[(u32, String)],
+    k: usize,
+    is_live: impl Fn(&u32) -> bool,
+) -> Option<GramDex> {
+    let mut ix = GramDex::new();
+    let mut any = false;
+    for (id, doc) in items {
+        // Skip docs too short for `k` grams (add_document_char_kgrams errors).
+        if is_live(id) && ix.add_document_char_kgrams(*id, doc, k).is_ok() {
+            any = true;
+        }
+    }
+    if !any {
+        return None;
+    }
+    Some(ix)
+}
+
 /// An updatable, durable character k-gram fuzzy-match index.
 pub struct UpdatableIndex {
     inner: SegmentedStore<GramBacking>,
@@ -106,7 +165,7 @@ impl UpdatableIndex {
         Ok(Self {
             inner: SegmentedStore::open(dir, GramBacking, flush_threshold)?,
             k,
-            sidecar_recipe: Self::make_sidecar_recipe(k),
+            sidecar_recipe: make_sidecar_recipe(k),
             cache: RefCell::new(Cache {
                 by_segment_id: HashMap::new(),
             }),
@@ -266,18 +325,7 @@ impl UpdatableIndex {
     }
 
     fn build_live_index(&self, items: &[(u32, String)]) -> Option<GramDex> {
-        let mut ix = GramDex::new();
-        let mut any = false;
-        for (id, doc) in items {
-            // Skip docs too short for `k` grams (add_document_char_kgrams errors).
-            if self.inner.is_live(id) && ix.add_document_char_kgrams(*id, doc, self.k).is_ok() {
-                any = true;
-            }
-        }
-        if !any {
-            return None;
-        }
-        Some(ix)
+        build_index_from_items(items, self.k, |id| self.inner.is_live(id))
     }
 
     /// Load segment `seg_id`'s persisted GramDex sidecar, or build it over the
@@ -348,43 +396,12 @@ impl UpdatableIndex {
         ids
     }
 
-    fn make_sidecar_recipe(k: usize) -> String {
-        format!("gramdex-store-v1;codec=postcard-gramdex-v1;k={k}")
-    }
-
     fn encode_sidecar(&self, index: &[u8]) -> Option<Vec<u8>> {
-        let recipe = self.sidecar_recipe.as_bytes();
-        let recipe_len = u32::try_from(recipe.len()).ok()?;
-        let mut bytes = Vec::with_capacity(16 + recipe.len() + index.len());
-        bytes.extend_from_slice(SIDECAR_MAGIC);
-        bytes.extend_from_slice(&SIDECAR_VERSION.to_le_bytes());
-        bytes.extend_from_slice(&recipe_len.to_le_bytes());
-        bytes.extend_from_slice(recipe);
-        bytes.extend_from_slice(index);
-        Some(bytes)
+        encode_sidecar(&self.sidecar_recipe, index)
     }
 
     fn decode_sidecar<'a>(&self, bytes: &'a [u8]) -> Option<&'a [u8]> {
-        if bytes.len() < 16 {
-            return None;
-        }
-        if &bytes[..8] != SIDECAR_MAGIC {
-            return None;
-        }
-        let version = u32::from_le_bytes(bytes[8..12].try_into().ok()?);
-        if version != SIDECAR_VERSION {
-            return None;
-        }
-        let recipe_len = u32::from_le_bytes(bytes[12..16].try_into().ok()?) as usize;
-        let recipe_start = 16usize;
-        let recipe_end = recipe_start.checked_add(recipe_len)?;
-        if bytes.len() < recipe_end {
-            return None;
-        }
-        if &bytes[recipe_start..recipe_end] != self.sidecar_recipe.as_bytes() {
-            return None;
-        }
-        Some(&bytes[recipe_end..])
+        decode_sidecar(&self.sidecar_recipe, bytes)
     }
 
     /// Persist sidecars for sealed segments that lack a current one. This is
@@ -409,15 +426,228 @@ impl UpdatableIndex {
     }
 }
 
+/// A read-only checkpoint view that loads per-segment `GramDex` sidecars before
+/// falling back to source segment payloads.
+///
+/// This is the restart/query path for larger stores whose built gram indexes
+/// have already been persisted by [`UpdatableIndex::checkpoint`]. It opens the
+/// segstore manifest without decoding source segments, then applies catalog
+/// tombstones to sidecar candidates at query time. If a sidecar is missing,
+/// stale by recipe, or not decodable, only that one source segment is decoded to
+/// rebuild the sidecar.
+pub struct SnapshotIndex {
+    catalog: SegmentCatalog<u32>,
+    k: usize,
+    sidecar_recipe: String,
+    cache: RefCell<Cache>,
+}
+
+impl SnapshotIndex {
+    /// Open the last checkpoint under `dir` as a read-only search snapshot.
+    ///
+    /// WAL records after the last checkpoint are intentionally not visible;
+    /// checkpoint before opening a snapshot when newly added documents must be
+    /// searchable through this path.
+    pub fn open(dir: Arc<dyn Directory>, k: usize) -> PersistenceResult<Self> {
+        Ok(Self {
+            catalog: SegmentCatalog::open(dir)?,
+            k,
+            sidecar_recipe: make_sidecar_recipe(k),
+            cache: RefCell::new(Cache {
+                by_segment_id: HashMap::new(),
+            }),
+        })
+    }
+
+    /// The character k-gram size this snapshot matches on.
+    pub fn k(&self) -> usize {
+        self.k
+    }
+
+    /// Number of checkpointed immutable segments in this snapshot.
+    pub fn segment_count(&self) -> usize {
+        self.catalog.segment_count()
+    }
+
+    /// Number of tombstoned document ids in this snapshot.
+    pub fn tombstone_count(&self) -> usize {
+        self.catalog.tombstone_count()
+    }
+
+    /// Candidate document ids whose character `k`-grams overlap `text`, unioned
+    /// over every live checkpointed document.
+    pub fn candidates(&self, text: &str) -> PersistenceResult<Vec<u32>> {
+        let query_grams = char_kgrams(text, self.k).unwrap_or_default();
+        self.candidates_from_grams(&query_grams, |ix, grams| ix.candidates_union(grams))
+    }
+
+    /// Candidate document ids that share at least `min_shared` distinct
+    /// character `k`-grams with `text`.
+    pub fn candidates_min_shared(
+        &self,
+        text: &str,
+        min_shared: u32,
+    ) -> PersistenceResult<Vec<u32>> {
+        let query_grams = char_kgrams(text, self.k).unwrap_or_default();
+        self.candidates_from_grams(&query_grams, |ix, grams| {
+            ix.candidates_union_min_shared(grams, min_shared)
+        })
+    }
+
+    fn candidates_from_grams(
+        &self,
+        query_grams: &[String],
+        mut per_segment: impl FnMut(&GramDex, &[String]) -> Vec<u32>,
+    ) -> PersistenceResult<Vec<u32>> {
+        let mut out: Vec<u32> = Vec::new();
+        let mut cache = self.cache.borrow_mut();
+        for &seg_id in self.catalog.segment_ids() {
+            if let Entry::Vacant(entry) = cache.by_segment_id.entry(seg_id) {
+                let index = self.build_or_load(seg_id)?;
+                entry.insert(index);
+            }
+            if let Some(Some(ix)) = cache.by_segment_id.get(&seg_id) {
+                out.extend(per_segment(ix, query_grams));
+            }
+        }
+        out.retain(|id| self.catalog.is_live(id));
+        out.sort_unstable();
+        out.dedup();
+        Ok(out)
+    }
+
+    fn build_or_load(&self, seg_id: u64) -> PersistenceResult<Option<GramDex>> {
+        if let Some(index) = self.load_sidecar(seg_id) {
+            return Ok(Some(index));
+        }
+        let segment: Vec<(u32, String)> = self.catalog.read_segment(seg_id)?;
+        let index = self.build_live_index(&segment);
+        if let Some(index) = &index {
+            self.persist_sidecar(index, &segment, seg_id);
+        }
+        Ok(index)
+    }
+
+    fn load_sidecar(&self, seg_id: u64) -> Option<GramDex> {
+        let name = self.catalog.index_name(seg_id, INDEX_KIND);
+        if !self.catalog.dir().exists(&name) {
+            return None;
+        }
+        let mut bytes = Vec::new();
+        self.catalog
+            .dir()
+            .open_file(&name)
+            .ok()?
+            .read_to_end(&mut bytes)
+            .ok()?;
+        let index_bytes = decode_sidecar(&self.sidecar_recipe, &bytes)?;
+        let sidecar: GramSidecar = postcard::from_bytes(index_bytes).ok()?;
+        Some(sidecar.index)
+    }
+
+    fn build_live_index(&self, items: &[(u32, String)]) -> Option<GramDex> {
+        build_index_from_items(items, self.k, |id| self.catalog.is_live(id))
+    }
+
+    fn persist_sidecar(&self, index: &GramDex, segment: &[(u32, String)], seg_id: u64) {
+        let sidecar = GramSidecarRef {
+            index,
+            ids: self.live_ids_vec(segment),
+        };
+        if let Ok(index_bytes) = postcard::to_allocvec(&sidecar) {
+            let Some(bytes) = encode_sidecar(&self.sidecar_recipe, &index_bytes) else {
+                return;
+            };
+            let _ = self
+                .catalog
+                .dir()
+                .atomic_write(&self.catalog.index_name(seg_id, INDEX_KIND), &bytes);
+        }
+    }
+
+    fn live_ids_vec(&self, segment: &[(u32, String)]) -> Vec<u32> {
+        let mut ids: Vec<u32> = segment
+            .iter()
+            .filter_map(|(id, _)| self.catalog.is_live(id).then_some(*id))
+            .collect();
+        ids.sort_unstable();
+        ids
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use durability::MemoryDirectory;
+    use std::io::Write;
+    use std::path::PathBuf;
+    use std::sync::Mutex;
 
     const A: &str = "hello";
     const B: &str = "yellow";
     const C: &str = "mellow";
     const D: &str = "a separate unrelated document";
+
+    struct RecordingDirectory {
+        inner: Arc<dyn Directory>,
+        opened: Arc<Mutex<Vec<String>>>,
+    }
+
+    impl RecordingDirectory {
+        fn wrap(inner: Arc<dyn Directory>) -> (Arc<dyn Directory>, Arc<Mutex<Vec<String>>>) {
+            let opened = Arc::new(Mutex::new(Vec::new()));
+            (
+                Arc::new(Self {
+                    inner,
+                    opened: opened.clone(),
+                }),
+                opened,
+            )
+        }
+    }
+
+    impl Directory for RecordingDirectory {
+        fn create_file(&self, path: &str) -> PersistenceResult<Box<dyn Write + Send>> {
+            self.inner.create_file(path)
+        }
+
+        fn open_file(&self, path: &str) -> PersistenceResult<Box<dyn Read + Send>> {
+            self.opened.lock().unwrap().push(path.to_string());
+            self.inner.open_file(path)
+        }
+
+        fn exists(&self, path: &str) -> bool {
+            self.inner.exists(path)
+        }
+
+        fn delete(&self, path: &str) -> PersistenceResult<()> {
+            self.inner.delete(path)
+        }
+
+        fn atomic_rename(&self, from: &str, to: &str) -> PersistenceResult<()> {
+            self.inner.atomic_rename(from, to)
+        }
+
+        fn create_dir_all(&self, path: &str) -> PersistenceResult<()> {
+            self.inner.create_dir_all(path)
+        }
+
+        fn list_dir(&self, path: &str) -> PersistenceResult<Vec<String>> {
+            self.inner.list_dir(path)
+        }
+
+        fn append_file(&self, path: &str) -> PersistenceResult<Box<dyn Write + Send>> {
+            self.inner.append_file(path)
+        }
+
+        fn atomic_write(&self, path: &str, data: &[u8]) -> PersistenceResult<()> {
+            self.inner.atomic_write(path, data)
+        }
+
+        fn file_path(&self, path: &str) -> Option<PathBuf> {
+            self.inner.file_path(path)
+        }
+    }
 
     fn read_file(dir: &Arc<dyn Directory>, name: &str) -> Vec<u8> {
         let mut bytes = Vec::new();
@@ -701,5 +931,86 @@ mod tests {
             "deleted id 2 must not resurface from a stale sidecar"
         );
         assert!(c.contains(&3), "live candidate should remain searchable");
+    }
+
+    #[test]
+    fn snapshot_index_queries_sidecars_without_opening_segment_payloads() {
+        let dir = MemoryDirectory::arc();
+        {
+            let mut store = UpdatableIndex::open(dir.clone(), 2, 3).unwrap();
+            store.add(1, A).unwrap();
+            store.add(2, B).unwrap();
+            store.add(3, C).unwrap();
+            store.add(4, D).unwrap();
+            store.checkpoint().unwrap();
+        }
+
+        let (watched, opened) = RecordingDirectory::wrap(dir);
+        let snapshot = SnapshotIndex::open(watched, 3).unwrap();
+        assert_eq!(snapshot.segment_count(), 2);
+        assert_eq!(snapshot.tombstone_count(), 0);
+        assert_eq!(snapshot.candidates_min_shared(C, 3).unwrap(), vec![2, 3]);
+
+        let opened = opened.lock().unwrap().clone();
+        assert!(
+            opened.iter().any(|path| path.starts_with("segstore.idx.")),
+            "snapshot should open persisted sidecars: {opened:?}"
+        );
+        assert!(
+            !opened.iter().any(|path| path.starts_with("segstore.seg.")),
+            "valid sidecars should avoid source segment payload reads: {opened:?}"
+        );
+    }
+
+    #[test]
+    fn snapshot_index_filters_tombstones_from_stale_sidecar_without_source_read() {
+        let dir = MemoryDirectory::arc();
+        let (name, stale_sidecar) = checkpointed_store(dir.clone(), 3);
+        {
+            let mut store = UpdatableIndex::open(dir.clone(), 2, 3).unwrap();
+            store.delete(2).unwrap();
+            store.checkpoint().unwrap();
+            store
+                .inner
+                .dir()
+                .atomic_write(&name, &stale_sidecar)
+                .unwrap();
+        }
+
+        let (watched, opened) = RecordingDirectory::wrap(dir);
+        let snapshot = SnapshotIndex::open(watched, 3).unwrap();
+        assert_eq!(snapshot.tombstone_count(), 1);
+        assert_eq!(snapshot.candidates_min_shared(C, 3).unwrap(), vec![3]);
+
+        let opened = opened.lock().unwrap().clone();
+        assert!(
+            opened.iter().any(|path| path.starts_with("segstore.idx.")),
+            "snapshot should use the stale sidecar before applying tombstones: {opened:?}"
+        );
+        assert!(
+            !opened.iter().any(|path| path.starts_with("segstore.seg.")),
+            "tombstone filtering should not require source segment payload reads: {opened:?}"
+        );
+    }
+
+    #[test]
+    fn snapshot_index_rebuilds_missing_sidecar_from_one_segment() {
+        let dir = MemoryDirectory::arc();
+        let (name, _) = checkpointed_store(dir.clone(), 3);
+        dir.delete(&name).unwrap();
+
+        let (watched, opened) = RecordingDirectory::wrap(dir.clone());
+        let snapshot = SnapshotIndex::open(watched, 3).unwrap();
+        assert_eq!(snapshot.candidates_min_shared(C, 3).unwrap(), vec![2, 3]);
+        assert!(
+            dir.exists(&name),
+            "snapshot fallback should persist the rebuilt sidecar"
+        );
+
+        let opened = opened.lock().unwrap().clone();
+        assert!(
+            opened.iter().any(|path| path.starts_with("segstore.seg.")),
+            "missing sidecar should fall back to one source segment read: {opened:?}"
+        );
     }
 }

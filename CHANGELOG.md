@@ -16,9 +16,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   instead of once per sealed segment, reducing warm multi-segment query latency.
 - Store writer searches now build the temporary writer-buffer index from the
   buffer slice instead of cloning buffered strings first.
+- The `store` feature now requires `segstore = "0.4.1"` and `postcard`. This
+  remains fully optional; default builds do not depend on the storage stack.
 
 ### Added
 
+- Added `store::SnapshotIndex`, a read-only checkpoint view that opens
+  segstore's manifest and queries persisted per-segment `GramDex` sidecars
+  before falling back to one source segment decode on a sidecar miss.
 - `examples/updatable_store` demonstrates the optional `store::UpdatableIndex`
   path: checkpoint, delete, reopen, `candidates_min_shared`, and caller-side
   verification of the returned candidate ids.
@@ -32,11 +37,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   rebuilding when sidecars are missing or stale. On the synthetic 20k-doc
   benchmark (`FLUSH=2_000`), cold sidecar load measured ~24.9 ms versus ~90.7
   ms for rebuilding missing sidecars.
-
-### Changed
-
-- The `store` feature now requires `segstore = "0.4"` and `postcard`. This
-  remains fully optional; default builds do not depend on the storage stack.
 
 ## [0.3.4] - 2026-06-28
 
