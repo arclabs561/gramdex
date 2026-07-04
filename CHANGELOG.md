@@ -21,6 +21,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Added `store::UpdatableIndex::plan_candidates`,
+  `store::UpdatableIndex::candidates_bounded`,
+  `store::SnapshotIndex::plan_candidates`, and
+  `store::SnapshotIndex::candidates_bounded`, bringing the durable store path
+  in line with the base `GramDex` broad-query bailout planner.
 - Added `store::SnapshotIndex`, a read-only checkpoint view that opens
   segstore's manifest and queries persisted per-segment `GramDex` sidecars
   before falling back to one source segment decode on a sidecar miss.

@@ -24,7 +24,7 @@ use std::sync::Arc;
 use durability::{Directory, PersistenceResult};
 use segstore::{SegmentCatalog, SegmentedStore, Store};
 
-use crate::{char_kgrams, GramDex};
+use crate::{char_kgrams, CandidatePlan, GramDex, PlannerConfig};
 
 /// segstore payload: items are document texts, a segment is a batch of source
 /// texts (a `GramDex` is built + cached from them).
@@ -140,6 +140,56 @@ fn build_index_from_items(
         return None;
     }
     Some(ix)
+}
+
+fn extend_live_document_ids(
+    out: &mut HashSet<u32>,
+    index: &GramDex,
+    is_live: impl Fn(&u32) -> bool,
+) {
+    out.extend(index.document_ids().filter(|id| is_live(id)));
+}
+
+fn extend_live_candidate_ids(
+    out: &mut HashSet<u32>,
+    index: &GramDex,
+    query_grams: &[String],
+    is_live: impl Fn(&u32) -> bool,
+) {
+    out.extend(
+        index
+            .candidates_union(query_grams)
+            .into_iter()
+            .filter(|id| is_live(id)),
+    );
+}
+
+fn should_scan_all(candidate_count: usize, doc_count: usize, cfg: PlannerConfig) -> bool {
+    if candidate_count >= cfg.max_candidates as usize {
+        return true;
+    }
+    let ratio = candidate_count as f32 / doc_count as f32;
+    ratio > cfg.max_candidate_ratio
+}
+
+fn candidate_plan(candidates: HashSet<u32>) -> CandidatePlan {
+    let mut out: Vec<u32> = candidates.into_iter().collect();
+    out.sort_unstable();
+    CandidatePlan::Candidates(out)
+}
+
+fn sorted_ids(ids: HashSet<u32>) -> Vec<u32> {
+    let mut out: Vec<u32> = ids.into_iter().collect();
+    out.sort_unstable();
+    out
+}
+
+fn empty_or_zero_doc_plan(query_grams: &[String], doc_count: usize) -> Option<CandidatePlan> {
+    if query_grams.is_empty() || doc_count == 0 {
+        Some(CandidatePlan::Candidates(Vec::new()))
+    } else {
+        None
+    }
 }
 
 /// An updatable, durable character k-gram fuzzy-match index.
@@ -284,6 +334,23 @@ impl UpdatableIndex {
         })
     }
 
+    /// Plan candidate generation with the same broad-query bailout semantics as
+    /// [`GramDex::plan_candidates_union`], applied across all live durable
+    /// segments plus the writer buffer.
+    pub fn plan_candidates(&self, text: &str, cfg: PlannerConfig) -> CandidatePlan {
+        let query_grams = char_kgrams(text, self.k).unwrap_or_default();
+        self.plan_candidates_from_grams(&query_grams, cfg)
+    }
+
+    /// Candidate ids, or all live indexed ids when the query is too broad for
+    /// candidate filtering to be useful.
+    pub fn candidates_bounded(&self, text: &str, cfg: PlannerConfig) -> Vec<u32> {
+        match self.plan_candidates(text, cfg) {
+            CandidatePlan::Candidates(candidates) => candidates,
+            CandidatePlan::ScanAll => self.live_document_ids(),
+        }
+    }
+
     fn candidates_from_grams(
         &self,
         query_grams: &[String],
@@ -314,6 +381,92 @@ impl UpdatableIndex {
         out.sort_unstable();
         out.dedup();
         out
+    }
+
+    fn plan_candidates_from_grams(
+        &self,
+        query_grams: &[String],
+        cfg: PlannerConfig,
+    ) -> CandidatePlan {
+        let buffered = self.build_live_index(self.inner.buffer());
+        let mut docs = HashSet::new();
+        {
+            let segs = self.inner.segments();
+            let mut cache = self.cache.borrow_mut();
+            let ids = self.inner.segment_ids();
+            for (i, seg) in segs.iter().enumerate() {
+                let seg_id = ids[i];
+                let index = cache
+                    .by_segment_id
+                    .entry(seg_id)
+                    .or_insert_with(|| self.build_or_load(&seg[..], seg_id));
+                if let Some(ix) = index {
+                    extend_live_document_ids(&mut docs, ix, |id| self.inner.is_live(id));
+                }
+            }
+        }
+        if let Some(ix) = &buffered {
+            extend_live_document_ids(&mut docs, ix, |id| self.inner.is_live(id));
+        }
+        let doc_count = docs.len();
+        if let Some(plan) = empty_or_zero_doc_plan(query_grams, doc_count) {
+            return plan;
+        }
+
+        let mut candidates = HashSet::new();
+        {
+            let segs = self.inner.segments();
+            let mut cache = self.cache.borrow_mut();
+            let ids = self.inner.segment_ids();
+            for (i, seg) in segs.iter().enumerate() {
+                let seg_id = ids[i];
+                let index = cache
+                    .by_segment_id
+                    .entry(seg_id)
+                    .or_insert_with(|| self.build_or_load(&seg[..], seg_id));
+                if let Some(ix) = index {
+                    extend_live_candidate_ids(&mut candidates, ix, query_grams, |id| {
+                        self.inner.is_live(id)
+                    });
+                    if should_scan_all(candidates.len(), doc_count, cfg) {
+                        return CandidatePlan::ScanAll;
+                    }
+                }
+            }
+        }
+        if let Some(ix) = &buffered {
+            extend_live_candidate_ids(&mut candidates, ix, query_grams, |id| {
+                self.inner.is_live(id)
+            });
+            if should_scan_all(candidates.len(), doc_count, cfg) {
+                return CandidatePlan::ScanAll;
+            }
+        }
+        candidate_plan(candidates)
+    }
+
+    fn live_document_ids(&self) -> Vec<u32> {
+        let mut out = HashSet::new();
+        {
+            let segs = self.inner.segments();
+            let mut cache = self.cache.borrow_mut();
+            let ids = self.inner.segment_ids();
+            for (i, seg) in segs.iter().enumerate() {
+                let seg_id = ids[i];
+                let index = cache
+                    .by_segment_id
+                    .entry(seg_id)
+                    .or_insert_with(|| self.build_or_load(&seg[..], seg_id));
+                if let Some(ix) = index {
+                    extend_live_document_ids(&mut out, ix, |id| self.inner.is_live(id));
+                }
+            }
+        }
+        let buffered = self.inner.buffer();
+        if let Some(ix) = self.build_live_index(buffered) {
+            extend_live_document_ids(&mut out, &ix, |id| self.inner.is_live(id));
+        }
+        sorted_ids(out)
     }
 
     fn prune_cache_to_current_segments(&self) {
@@ -494,6 +647,30 @@ impl SnapshotIndex {
         })
     }
 
+    /// Plan candidate generation with broad-query bailout semantics over the
+    /// checkpointed segment set.
+    pub fn plan_candidates(
+        &self,
+        text: &str,
+        cfg: PlannerConfig,
+    ) -> PersistenceResult<CandidatePlan> {
+        let query_grams = char_kgrams(text, self.k).unwrap_or_default();
+        self.plan_candidates_from_grams(&query_grams, cfg)
+    }
+
+    /// Candidate ids, or all live indexed ids when the query is too broad for
+    /// candidate filtering to be useful.
+    pub fn candidates_bounded(
+        &self,
+        text: &str,
+        cfg: PlannerConfig,
+    ) -> PersistenceResult<Vec<u32>> {
+        match self.plan_candidates(text, cfg)? {
+            CandidatePlan::Candidates(candidates) => Ok(candidates),
+            CandidatePlan::ScanAll => self.live_document_ids(),
+        }
+    }
+
     fn candidates_from_grams(
         &self,
         query_grams: &[String],
@@ -514,6 +691,56 @@ impl SnapshotIndex {
         out.sort_unstable();
         out.dedup();
         Ok(out)
+    }
+
+    fn plan_candidates_from_grams(
+        &self,
+        query_grams: &[String],
+        cfg: PlannerConfig,
+    ) -> PersistenceResult<CandidatePlan> {
+        let mut docs = HashSet::new();
+        let mut cache = self.cache.borrow_mut();
+        for &seg_id in self.catalog.segment_ids() {
+            if let Entry::Vacant(entry) = cache.by_segment_id.entry(seg_id) {
+                let index = self.build_or_load(seg_id)?;
+                entry.insert(index);
+            }
+            if let Some(Some(ix)) = cache.by_segment_id.get(&seg_id) {
+                extend_live_document_ids(&mut docs, ix, |id| self.catalog.is_live(id));
+            }
+        }
+        let doc_count = docs.len();
+        if let Some(plan) = empty_or_zero_doc_plan(query_grams, doc_count) {
+            return Ok(plan);
+        }
+
+        let mut candidates = HashSet::new();
+        for &seg_id in self.catalog.segment_ids() {
+            if let Some(Some(ix)) = cache.by_segment_id.get(&seg_id) {
+                extend_live_candidate_ids(&mut candidates, ix, query_grams, |id| {
+                    self.catalog.is_live(id)
+                });
+                if should_scan_all(candidates.len(), doc_count, cfg) {
+                    return Ok(CandidatePlan::ScanAll);
+                }
+            }
+        }
+        Ok(candidate_plan(candidates))
+    }
+
+    fn live_document_ids(&self) -> PersistenceResult<Vec<u32>> {
+        let mut out = HashSet::new();
+        let mut cache = self.cache.borrow_mut();
+        for &seg_id in self.catalog.segment_ids() {
+            if let Entry::Vacant(entry) = cache.by_segment_id.entry(seg_id) {
+                let index = self.build_or_load(seg_id)?;
+                entry.insert(index);
+            }
+            if let Some(Some(ix)) = cache.by_segment_id.get(&seg_id) {
+                extend_live_document_ids(&mut out, ix, |id| self.catalog.is_live(id));
+            }
+        }
+        Ok(sorted_ids(out))
     }
 
     fn build_or_load(&self, seg_id: u64) -> PersistenceResult<Option<GramDex>> {
@@ -934,6 +1161,24 @@ mod tests {
     }
 
     #[test]
+    fn store_bounded_candidates_scan_all_returns_live_indexed_ids() {
+        let dir = MemoryDirectory::arc();
+        let mut store = UpdatableIndex::open(dir, 2, 3).unwrap();
+        store.add(1, A).unwrap();
+        store.add(2, B).unwrap();
+        store.add(3, C).unwrap();
+        store.add(4, D).unwrap();
+        store.delete(2).unwrap();
+
+        let cfg = PlannerConfig {
+            max_candidate_ratio: 0.0,
+            max_candidates: 1,
+        };
+        assert_eq!(store.plan_candidates(C, cfg), CandidatePlan::ScanAll);
+        assert_eq!(store.candidates_bounded(C, cfg), vec![1, 3, 4]);
+    }
+
+    #[test]
     fn snapshot_index_queries_sidecars_without_opening_segment_payloads() {
         let dir = MemoryDirectory::arc();
         {
@@ -959,6 +1204,44 @@ mod tests {
         assert!(
             !opened.iter().any(|path| path.starts_with("segstore.seg.")),
             "valid sidecars should avoid source segment payload reads: {opened:?}"
+        );
+    }
+
+    #[test]
+    fn snapshot_index_bounded_scan_all_uses_sidecar_ids_without_source_read() {
+        let dir = MemoryDirectory::arc();
+        {
+            let mut store = UpdatableIndex::open(dir.clone(), 2, 3).unwrap();
+            store.add(1, A).unwrap();
+            store.add(2, B).unwrap();
+            store.add(3, C).unwrap();
+            store.add(4, D).unwrap();
+            store.checkpoint().unwrap();
+        }
+
+        let cfg = PlannerConfig {
+            max_candidate_ratio: 0.0,
+            max_candidates: 1,
+        };
+        let (watched, opened) = RecordingDirectory::wrap(dir);
+        let snapshot = SnapshotIndex::open(watched, 3).unwrap();
+        assert_eq!(
+            snapshot.plan_candidates(C, cfg).unwrap(),
+            CandidatePlan::ScanAll
+        );
+        assert_eq!(
+            snapshot.candidates_bounded(C, cfg).unwrap(),
+            vec![1, 2, 3, 4]
+        );
+
+        let opened = opened.lock().unwrap().clone();
+        assert!(
+            opened.iter().any(|path| path.starts_with("segstore.idx.")),
+            "bounded snapshot planning should open persisted sidecars: {opened:?}"
+        );
+        assert!(
+            !opened.iter().any(|path| path.starts_with("segstore.seg.")),
+            "valid sidecars should provide scan-all ids without source reads: {opened:?}"
         );
     }
 

@@ -68,8 +68,9 @@ so unchanged segments can load their built `GramDex` blocks after a restart
 instead of rebuilding them. Opt-in; the default build does not depend on
 segstore. `store::SnapshotIndex` opens the last checkpoint manifest and queries
 sidecars first, so source text batches are read only when a sidecar is missing
-or unusable. `candidates_min_shared` exposes the same shared-gram pruning as
-the in-memory index for durable stores.
+or unusable. `candidates_min_shared`, `plan_candidates`, and
+`candidates_bounded` expose the same shared-gram pruning and broad-query bailout
+as the in-memory index for durable stores.
 
 ```sh
 cargo run --features store --example updatable_store
