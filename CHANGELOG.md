@@ -21,6 +21,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Added a `store_reopen_diagnostics` example that measures the
+  `store::SnapshotIndex` sidecar-first reader path versus rebuilding missing
+  per-segment `GramDex` sidecars from source segments.
 - Added `store::UpdatableIndex::plan_candidates`,
   `store::UpdatableIndex::candidates_bounded`,
   `store::SnapshotIndex::plan_candidates`, and
