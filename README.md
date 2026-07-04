@@ -71,6 +71,21 @@ open path; the sidecars avoid rebuilding gram indexes.
 `candidates_min_shared` exposes the same shared-gram pruning as the in-memory
 index for durable stores.
 
+```sh
+cargo run --features store --example updatable_store
+```
+
+```text
+before delete:
+  candidates: [1, 2, 3]
+  min_shared=3: [2, 3]
+after reopen:
+  candidates: [1, 3]
+  min_shared=3: [3]
+  verified doc 3: jaccard=1.000, text="mellow"
+  verified doc 1: jaccard=0.400, text="hello"
+```
+
 ## License
 
 Licensed under either of:

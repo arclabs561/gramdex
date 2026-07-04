@@ -19,6 +19,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `examples/updatable_store` demonstrates the optional `store::UpdatableIndex`
+  path: checkpoint, delete, reopen, `candidates_min_shared`, and caller-side
+  verification of the returned candidate ids.
 - Added `store::UpdatableIndex::candidates_min_shared`, exposing shared-gram
   candidate pruning through the durable store wrapper.
 - The `store` feature now persists per-segment `GramDex` sidecars containing
