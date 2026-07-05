@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- Store sidecar envelopes now include the `segstore` segment id, so a copied or
+  misnamed `GramDex` sidecar is rejected and rebuilt instead of being accepted
+  for a different segment.
+
 ### Changed
 
 - `store::UpdatableIndex` now keys its in-memory per-segment `GramDex` cache by
