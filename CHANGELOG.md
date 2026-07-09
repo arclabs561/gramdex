@@ -22,7 +22,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   instead of once per sealed segment, reducing warm multi-segment query latency.
 - Store writer searches now build the temporary writer-buffer index from the
   buffer slice instead of cloning buffered strings first.
-- The `store` feature now requires `segstore = "0.4.1"` and `postcard`. This
+- The optional `store` stack now requires `segstore` 0.5, `durability` 0.7.1,
+  and `postcard`, using `segstore::DefaultStore` for source-text segments and
+  `segstore::SidecarEnvelope` for checked `GramDex` sidecar framing. This
   remains fully optional; default builds do not depend on the storage stack.
 
 ### Added

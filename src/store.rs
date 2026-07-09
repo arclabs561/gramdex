@@ -22,43 +22,13 @@ use std::io::Read;
 use std::sync::Arc;
 
 use durability::{Directory, PersistenceResult};
-use segstore::{SegmentCatalog, SegmentedStore, Store};
+use segstore::{DefaultStore, SegmentCatalog, SegmentedStore, SidecarEnvelope};
 
 use crate::{char_kgrams, CandidatePlan, GramDex, PlannerConfig};
 
 /// segstore payload: items are document texts, a segment is a batch of source
 /// texts (a `GramDex` is built + cached from them).
-struct GramBacking;
-
-impl Store for GramBacking {
-    type Id = u32;
-    type Item = String;
-    type Segment = Vec<(u32, String)>;
-
-    fn build_segment(&self, batch: &[(u32, String)]) -> Vec<(u32, String)> {
-        batch.to_vec()
-    }
-
-    fn merge_segments(
-        &self,
-        segs: &[&Vec<(u32, String)>],
-        live: &dyn Fn(&u32) -> bool,
-    ) -> Vec<(u32, String)> {
-        segs.iter()
-            .flat_map(|s| s.iter())
-            .filter(|(id, _)| live(id))
-            .cloned()
-            .collect()
-    }
-
-    fn segment_len(&self, seg: &Vec<(u32, String)>) -> usize {
-        seg.len()
-    }
-
-    fn live_len(&self, seg: &Vec<(u32, String)>, live: &dyn Fn(&u32) -> bool) -> Option<usize> {
-        Some(seg.iter().filter(|(id, _)| live(id)).count())
-    }
-}
+type GramBacking = DefaultStore<u32, String>;
 
 /// Per-segment indexes keyed by segstore's stable segment id. A sealed add
 /// creates one new segment id, so cached indexes for existing segments are
@@ -89,43 +59,25 @@ fn make_sidecar_recipe(k: usize) -> String {
 }
 
 fn encode_sidecar(recipe: &str, seg_id: u64, index: &[u8]) -> Option<Vec<u8>> {
-    let recipe = recipe.as_bytes();
-    let recipe_len = u32::try_from(recipe.len()).ok()?;
-    let mut bytes = Vec::with_capacity(24 + recipe.len() + index.len());
-    bytes.extend_from_slice(SIDECAR_MAGIC);
-    bytes.extend_from_slice(&SIDECAR_VERSION.to_le_bytes());
-    bytes.extend_from_slice(&seg_id.to_le_bytes());
-    bytes.extend_from_slice(&recipe_len.to_le_bytes());
-    bytes.extend_from_slice(recipe);
-    bytes.extend_from_slice(index);
-    Some(bytes)
+    SidecarEnvelope::encode(
+        SIDECAR_MAGIC,
+        SIDECAR_VERSION,
+        seg_id,
+        recipe.as_bytes(),
+        index,
+    )
+    .ok()
 }
 
 fn decode_sidecar<'a>(recipe: &str, seg_id: u64, bytes: &'a [u8]) -> Option<&'a [u8]> {
-    if bytes.len() < 24 {
-        return None;
-    }
-    if &bytes[..8] != SIDECAR_MAGIC {
-        return None;
-    }
-    let version = u32::from_le_bytes(bytes[8..12].try_into().ok()?);
-    if version != SIDECAR_VERSION {
-        return None;
-    }
-    let encoded_seg_id = u64::from_le_bytes(bytes[12..20].try_into().ok()?);
-    if encoded_seg_id != seg_id {
-        return None;
-    }
-    let recipe_len = u32::from_le_bytes(bytes[20..24].try_into().ok()?) as usize;
-    let recipe_start = 24usize;
-    let recipe_end = recipe_start.checked_add(recipe_len)?;
-    if bytes.len() < recipe_end {
-        return None;
-    }
-    if &bytes[recipe_start..recipe_end] != recipe.as_bytes() {
-        return None;
-    }
-    Some(&bytes[recipe_end..])
+    SidecarEnvelope::decode(
+        SIDECAR_MAGIC,
+        SIDECAR_VERSION,
+        seg_id,
+        recipe.as_bytes(),
+        bytes,
+    )
+    .ok()
 }
 
 fn build_index_from_items(
@@ -218,7 +170,7 @@ impl UpdatableIndex {
         k: usize,
     ) -> PersistenceResult<Self> {
         Ok(Self {
-            inner: SegmentedStore::open(dir, GramBacking, flush_threshold)?,
+            inner: SegmentedStore::open(dir, GramBacking::new(), flush_threshold)?,
             k,
             sidecar_recipe: make_sidecar_recipe(k),
             cache: RefCell::new(Cache {
