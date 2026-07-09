@@ -9,7 +9,7 @@ K-gram indexing for approximate string matching.
 
 ```toml
 [dependencies]
-gramdex = "0.3.4"
+gramdex = "0.4"
 ```
 
 ```rust
