@@ -6,7 +6,7 @@
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use durability::{Directory, MemoryDirectory};
+use durability::{Directory, FsDirectory};
 use gramdex::store::{SnapshotIndex, UpdatableIndex};
 
 const N: usize = 1_000;
@@ -18,13 +18,14 @@ const QUERY_ID: u32 = 377;
 type DynError = Box<dyn std::error::Error>;
 type StoreDir = Arc<dyn Directory>;
 type Candidates = Vec<u32>;
+type BuiltStore = (tempfile::TempDir, StoreDir, String);
 
 fn main() -> Result<(), DynError> {
-    let (load_dir, query) = build_checkpointed_dir()?;
+    let (_load_root, load_dir, query) = build_checkpointed_dir()?;
     let load_sidecars = sidecar_count(&load_dir)?;
     let (load_elapsed, load_hits) = first_snapshot_query(load_dir.clone(), &query)?;
 
-    let (rebuild_dir, rebuild_query) = build_checkpointed_dir()?;
+    let (_rebuild_root, rebuild_dir, rebuild_query) = build_checkpointed_dir()?;
     let sidecars_before_delete = sidecar_count(&rebuild_dir)?;
     delete_sidecars(&rebuild_dir)?;
     let sidecars_after_delete = sidecar_count(&rebuild_dir)?;
@@ -52,12 +53,13 @@ fn main() -> Result<(), DynError> {
     Ok(())
 }
 
-fn build_checkpointed_dir() -> Result<(StoreDir, String), DynError> {
-    let dir: StoreDir = MemoryDirectory::arc();
+fn build_checkpointed_dir() -> Result<BuiltStore, DynError> {
+    let root = tempfile::tempdir()?;
+    let dir: StoreDir = FsDirectory::arc(root.path())?;
     let mut index = UpdatableIndex::open(dir.clone(), FLUSH, K)?;
     index.extend((0..N).map(|id| (id as u32, text(id as u32))))?;
     index.checkpoint()?;
-    Ok((dir, text(QUERY_ID)))
+    Ok((root, dir, text(QUERY_ID)))
 }
 
 fn first_snapshot_query(dir: StoreDir, query: &str) -> Result<(Duration, Candidates), DynError> {
