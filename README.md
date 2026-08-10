@@ -5,6 +5,9 @@
 
 K-gram indexing for approximate string matching.
 
+Index queries return candidates, not final matches. Verify them with an exact
+or application-specific similarity check before presenting results.
+
 ## Quickstart
 
 ```toml
@@ -77,14 +80,15 @@ cargo run --features store --example updatable_store
 
 For measurement, `cargo run --release --features store --example store_reopen_diagnostics`
 prints the first snapshot-query cost with persisted `GramDex` sidecars present
-versus after deleting those sidecars and forcing source-segment rebuilds.
+versus after deleting those sidecars and forcing source-segment rebuilds. The
+reported timings depend on the machine and filesystem; the command also prints
+document and sidecar counts, matching candidates, and whether the query document
+was recovered.
 
 ```text
 documents: 1000, flush threshold: 200, k-grams: 3
 sidecars loaded path: 5
 sidecars rebuild path before/after delete: 5/0
-first snapshot query with sidecars: 3140 us
-first snapshot query after deleting sidecars: 7045 us
 matching candidates: 1
 query doc present: true
 ```
