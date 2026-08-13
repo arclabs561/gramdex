@@ -92,3 +92,17 @@ fn indexed_candidate_paths_match_naive_distinct_trigram_oracle() {
         }
     }
 }
+
+#[test]
+fn arbitrary_document_order_and_repeated_adds_preserve_set_semantics() {
+    let mut index = GramDex::new();
+    let shared = vec!["abc".to_owned(), "abc".to_owned()];
+
+    index.add_document(9, &shared);
+    index.add_document(2, &shared);
+    index.add_document(9, &shared);
+
+    assert_eq!(index.df("abc"), 2);
+    assert_eq!(index.candidates_union(&shared), vec![2, 9]);
+    assert_eq!(index.candidates_union_scored(&shared), vec![(2, 1), (9, 1)]);
+}

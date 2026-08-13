@@ -40,7 +40,7 @@ struct Cache {
 /// The `kind` tag for a persisted per-segment GramDex sidecar.
 const INDEX_KIND: &str = "gramdex";
 const SIDECAR_MAGIC: &[u8; 8] = b"GRDXIDX1";
-const SIDECAR_VERSION: u32 = 2;
+const SIDECAR_VERSION: u32 = 3;
 
 #[derive(serde::Serialize)]
 struct GramSidecarRef<'a> {

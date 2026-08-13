@@ -175,12 +175,100 @@ pub fn trigram_jaccard(a: &str, b: &str) -> f32 {
     (inter as f32) / (union as f32)
 }
 
-/// A minimal grams->docs candidate index.
+#[derive(Debug)]
+enum PostingList {
+    Sorted(Vec<DocId>),
+    Unordered(HashSet<DocId>),
+}
+
+#[cfg(feature = "serde")]
+impl serde::Serialize for PostingList {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        serializer.collect_seq(self.iter())
+    }
+}
+
+#[cfg(feature = "serde")]
+impl<'de> serde::Deserialize<'de> for PostingList {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let docs = <Vec<DocId> as serde::Deserialize>::deserialize(deserializer)?;
+        if docs.windows(2).all(|pair| pair[0] < pair[1]) {
+            Ok(Self::Sorted(docs))
+        } else {
+            Ok(Self::Unordered(docs.into_iter().collect()))
+        }
+    }
+}
+
+impl Default for PostingList {
+    fn default() -> Self {
+        Self::Sorted(Vec::new())
+    }
+}
+
+impl PostingList {
+    fn insert(&mut self, doc_id: DocId) {
+        match self {
+            Self::Sorted(docs) => match docs.last().copied() {
+                None => docs.push(doc_id),
+                Some(last) if last < doc_id => docs.push(doc_id),
+                Some(last) if last == doc_id => {}
+                _ if docs.binary_search(&doc_id).is_ok() => {}
+                _ => {
+                    let mut set: HashSet<_> = docs.drain(..).collect();
+                    set.insert(doc_id);
+                    *self = Self::Unordered(set);
+                }
+            },
+            Self::Unordered(docs) => {
+                docs.insert(doc_id);
+            }
+        }
+    }
+
+    fn len(&self) -> usize {
+        match self {
+            Self::Sorted(docs) => docs.len(),
+            Self::Unordered(docs) => docs.len(),
+        }
+    }
+
+    fn extend(&self, out: &mut Vec<DocId>) {
+        match self {
+            Self::Sorted(docs) => out.extend_from_slice(docs),
+            Self::Unordered(docs) => out.extend(docs.iter().copied()),
+        }
+    }
+
+    fn iter(&self) -> impl Iterator<Item = DocId> + '_ {
+        let sorted = match self {
+            Self::Sorted(docs) => Some(docs.as_slice()),
+            Self::Unordered(_) => None,
+        };
+        let unordered = match self {
+            Self::Sorted(_) => None,
+            Self::Unordered(docs) => Some(docs.iter()),
+        };
+        sorted
+            .into_iter()
+            .flatten()
+            .copied()
+            .chain(unordered.into_iter().flatten().copied())
+    }
+}
+
 #[derive(Debug, Default)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+/// A minimal grams-to-documents candidate index.
 pub struct GramDex {
     // gram -> docs containing gram
-    grams: HashMap<String, HashSet<DocId>>,
+    grams: HashMap<String, PostingList>,
     // all indexed docs (for ScanAll fallback)
     docs: HashSet<DocId>,
 }
@@ -246,19 +334,24 @@ impl GramDex {
     /// This is intentionally permissive (no false negatives for the grams set),
     /// but may include many false positives; callers should verify.
     pub fn candidates_union(&self, query_grams: &[String]) -> Vec<DocId> {
-        let mut out: HashSet<DocId> = HashSet::new();
-        let mut seen: HashSet<&str> = HashSet::new();
-        for g in query_grams {
-            if !seen.insert(g.as_str()) {
-                continue;
-            }
+        let mut grams: Vec<&str> = query_grams.iter().map(String::as_str).collect();
+        grams.sort_unstable();
+        grams.dedup();
+
+        let capacity = grams
+            .iter()
+            .filter_map(|g| self.grams.get(*g))
+            .map(PostingList::len)
+            .sum();
+        let mut out = Vec::with_capacity(capacity);
+        for g in grams {
             if let Some(ds) = self.grams.get(g) {
-                out.extend(ds.iter().copied());
+                ds.extend(&mut out);
             }
         }
-        let mut v: Vec<DocId> = out.into_iter().collect();
-        v.sort_unstable();
-        v
+        out.sort_unstable();
+        out.dedup();
+        out
     }
 
     /// Convenience: union candidates for Unicode-scalar k-grams of `text`.
@@ -320,14 +413,14 @@ impl GramDex {
     /// assert!(scored[0].0 == 0 && scored[0].1 >= 2);
     /// ```
     pub fn candidates_union_scored(&self, query_grams: &[String]) -> Vec<(DocId, u32)> {
-        let mut seen: HashSet<&str> = HashSet::new();
+        let mut grams: Vec<&str> = query_grams.iter().map(String::as_str).collect();
+        grams.sort_unstable();
+        grams.dedup();
+
         let mut counts: HashMap<DocId, u32> = HashMap::new();
-        for g in query_grams {
-            if !seen.insert(g.as_str()) {
-                continue;
-            }
+        for g in grams {
             if let Some(ds) = self.grams.get(g) {
-                for &doc in ds {
+                for doc in ds.iter() {
                     *counts.entry(doc).or_insert(0) += 1;
                 }
             }
@@ -381,14 +474,14 @@ impl GramDex {
             return CandidatePlan::Candidates(Vec::new());
         }
 
-        let mut seen: HashSet<&str> = HashSet::new();
+        let mut grams: Vec<&str> = query_grams.iter().map(String::as_str).collect();
+        grams.sort_unstable();
+        grams.dedup();
+
         let mut out: HashSet<DocId> = HashSet::new();
-        for g in query_grams {
-            if !seen.insert(g.as_str()) {
-                continue;
-            }
+        for g in grams {
             if let Some(ds) = self.grams.get(g) {
-                out.extend(ds.iter().copied());
+                out.extend(ds.iter());
 
                 if out.len() >= cfg.max_candidates as usize {
                     return CandidatePlan::ScanAll;
