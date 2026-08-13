@@ -187,7 +187,11 @@ impl serde::Serialize for PostingList {
     where
         S: serde::Serializer,
     {
-        serializer.collect_seq(self.iter())
+        let mut seq = serializer.serialize_seq(Some(self.len()))?;
+        for doc in self.iter() {
+            serde::ser::SerializeSeq::serialize_element(&mut seq, &doc)?;
+        }
+        serde::ser::SerializeSeq::end(seq)
     }
 }
 
