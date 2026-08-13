@@ -958,6 +958,95 @@ mod tests {
     }
 
     #[test]
+    fn writer_and_snapshot_stay_in_parity_for_unicode_deletes_and_compaction() {
+        const QUERIES: &[&str] = &[
+            "",
+            "é",
+            "é界🙂",
+            "naïve café 🚀",
+            "東京タワー🗼",
+            "🙂🙃🙂🙃",
+            "a query longer than every indexed document",
+        ];
+
+        fn assert_snapshot_parity(store: &UpdatableIndex, dir: Arc<dyn Directory>, phase: &str) {
+            let snapshot = SnapshotIndex::open(dir, store.k()).unwrap();
+            let scan_all = PlannerConfig {
+                max_candidate_ratio: 0.0,
+                max_candidates: 1,
+            };
+
+            for &query in QUERIES {
+                assert_eq!(
+                    snapshot.candidates(query).unwrap(),
+                    store.candidates(query),
+                    "candidate parity failed {phase} for {query:?}"
+                );
+                assert_eq!(
+                    snapshot.candidates_min_shared(query, 2).unwrap(),
+                    store.candidates_min_shared(query, 2),
+                    "min-shared parity failed {phase} for {query:?}"
+                );
+                assert_eq!(
+                    snapshot.candidates_bounded(query, scan_all).unwrap(),
+                    store.candidates_bounded(query, scan_all),
+                    "bounded parity failed {phase} for {query:?}"
+                );
+            }
+        }
+
+        let dir = MemoryDirectory::arc();
+        let mut store = UpdatableIndex::open(dir.clone(), 2, 3).unwrap();
+        // Descending ids force posting lists out of their compact ascending form,
+        // while the texts exercise Unicode scalar (not byte) k-grams.
+        for (id, text) in [
+            (90, "naïve café 🚀"),
+            (70, "café 🚀 launch"),
+            (50, "東京タワー🗼"),
+            (30, "東京タワー夜景"),
+            (10, "🙂🙃🙂🙃"),
+            (5, "é"),
+            (1, "é界🙂"),
+        ] {
+            store.add(id, text).unwrap();
+        }
+        store.checkpoint().unwrap();
+        assert_snapshot_parity(&store, dir.clone(), "after checkpoint");
+
+        store.delete(70).unwrap();
+        store.delete(5).unwrap();
+        store.checkpoint().unwrap();
+        assert_snapshot_parity(&store, dir.clone(), "after deletes");
+
+        store.compact().unwrap();
+        assert_snapshot_parity(&store, dir, "after compaction");
+    }
+
+    #[test]
+    fn checkpoint_sidecar_roundtrips_unordered_posting_lists() {
+        let dir = MemoryDirectory::arc();
+        {
+            let mut store = UpdatableIndex::open(dir.clone(), 2, 3).unwrap();
+            store.add(20, "café noir").unwrap();
+            store.add(10, "café blanc").unwrap();
+            store.checkpoint().unwrap();
+
+            let seg_id = store.inner.segment_ids()[0];
+            let name = store.inner.index_name(seg_id, INDEX_KIND);
+            assert!(dir.exists(&name), "checkpoint must encode the sidecar");
+            assert!(
+                store
+                    .load_sidecar(&store.inner.segments()[0], seg_id)
+                    .is_some(),
+                "postcard must decode the sidecar sequence with its encoded length"
+            );
+        }
+
+        let snapshot = SnapshotIndex::open(dir, 3).unwrap();
+        assert_eq!(snapshot.candidates("café").unwrap(), vec![10, 20]);
+    }
+
+    #[test]
     fn compact_prunes_cached_segment_indexes() {
         let dir = MemoryDirectory::arc();
         let mut store = UpdatableIndex::open(dir, 2, 3).unwrap();
