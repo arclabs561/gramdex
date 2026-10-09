@@ -1,3 +1,4 @@
+#![doc = include_str!("../README.md")]
 //! `gramdex`: k-gram indexing primitives for approximate string matching.
 //!
 //! This crate is about **candidate generation** for fuzzy matching:

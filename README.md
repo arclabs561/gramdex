@@ -26,8 +26,8 @@ let candidates = ix.candidates_union_trigrams("mellow");
 let mut verified: Vec<u32> = candidates
     .into_iter()
     .filter(|&doc| match doc {
-        1 => trigram_jaccard("mellow", "hello") >= 0.2,
-        2 => trigram_jaccard("mellow", "yellow") >= 0.2,
+        1 => trigram_jaccard("mellow", "hello") >= 0.5,
+        2 => trigram_jaccard("mellow", "yellow") >= 0.5,
         _ => false,
     })
     .collect();
@@ -78,6 +78,19 @@ as the in-memory index for durable stores.
 cargo run --features store --example updatable_store
 ```
 
+Output:
+
+```text
+before delete:
+  candidates: [1, 2, 3]
+  min_shared=3: [2, 3]
+after reopen:
+  candidates: [1, 3]
+  min_shared=3: [3]
+  verified doc 3: jaccard=1.000, text="mellow"
+  verified doc 1: jaccard=0.400, text="hello"
+```
+
 For measurement, `cargo run --release --features store --example store_reopen_diagnostics`
 prints the first snapshot-query cost with persisted `GramDex` sidecars present
 versus after deleting those sidecars and forcing source-segment rebuilds. The
@@ -91,17 +104,6 @@ sidecars loaded path: 5
 sidecars rebuild path before/after delete: 5/0
 matching candidates: 1
 query doc present: true
-```
-
-```text
-before delete:
-  candidates: [1, 2, 3]
-  min_shared=3: [2, 3]
-after reopen:
-  candidates: [1, 3]
-  min_shared=3: [3]
-  verified doc 3: jaccard=1.000, text="mellow"
-  verified doc 1: jaccard=0.400, text="hello"
 ```
 
 ## License
