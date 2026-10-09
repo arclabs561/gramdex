@@ -7,6 +7,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-10-09
+
+### Changed
+
+- The optional `store` feature now requires `segstore` 0.6 and `durability`
+  0.8. This is a breaking change: `store::UpdatableIndex::open` and
+  `store::SnapshotIndex::open` take `Arc<dyn durability::Directory>`, so
+  callers must pass a directory from `durability` 0.8.
+- `GramDex` stores a posting list as a sorted vector while documents are added
+  in ascending id order, and falls back to a hash set otherwise.
+  `GramDex::candidates_union` collects candidates into one presized vector
+  instead of a hash set.
+- The published package contains only the sources, tests, examples, benches,
+  README, changelog, and license files.
+
+### Fixed
+
+- Re-adding a document id after its earlier copy was sealed into a segment
+  now replaces that copy. Before, `store::UpdatableIndex` and
+  `store::SnapshotIndex` candidate queries could still return the id for text
+  that only its old copy matched.
+
 ## [0.4.0] - 2026-07-09
 
 ### Fixed

@@ -12,7 +12,7 @@ or application-specific similarity check before presenting results.
 
 ```toml
 [dependencies]
-gramdex = "0.4"
+gramdex = "0.5"
 ```
 
 ```rust
