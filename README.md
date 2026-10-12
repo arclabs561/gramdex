@@ -12,8 +12,11 @@ or application-specific similarity check before presenting results.
 
 ```toml
 [dependencies]
-gramdex = "0.5"
+gramdex = "0.6"
 ```
+
+The default build supports Rust 1.80. The optional `store` feature requires
+Rust 1.83 with current dependencies.
 
 ```rust
 use gramdex::{GramDex, trigram_jaccard};
