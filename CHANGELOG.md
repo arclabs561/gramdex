@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-10-12
+
+### Changed
+
+- The optional `store` feature now requires `segstore` 0.7 and `durability`
+  0.9. This is a breaking change: callers of `store::UpdatableIndex::open`
+  and `store::SnapshotIndex::open` must use `durability` 0.9 directories.
+  The shared conformance dependency uses the same `segstore` series.
+  This dependency update changes no gramdex indexing algorithm or disk format.
+- Document and check the existing Rust 1.83 requirement for `store` with
+  current dependencies; the default build continues to support Rust 1.80.
+
 ## [0.5.0] - 2026-10-09
 
 ### Changed
