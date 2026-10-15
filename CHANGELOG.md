@@ -5,6 +5,13 @@ All notable changes to this project are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## Source history (unversioned)
+
+These entries identify source changes without assigning a package release.
+
+- Clarify that repeated base-index document IDs accumulate gram associations and deduplicate identical associations.
+  ([ff87ff3](https://github.com/arclabs561/gramdex/commit/ff87ff36c526d9dc37207336cadc68638f83b532))
+
 ## [Unreleased]
 
 ## [0.6.0] - 2026-10-12
