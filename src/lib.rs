@@ -285,6 +285,9 @@ impl GramDex {
     }
 
     /// Insert grams for a document id.
+    ///
+    /// Repeated document ids accumulate gram associations without removing
+    /// previous grams. Identical gram-document associations are deduplicated.
     pub fn add_document(&mut self, doc_id: DocId, grams: &[String]) {
         self.docs.insert(doc_id);
         for g in grams {
@@ -293,6 +296,8 @@ impl GramDex {
     }
 
     /// Insert Unicode-scalar k-grams for a document id.
+    ///
+    /// Repeated ids follow the additive contract of [`Self::add_document`].
     pub fn add_document_char_kgrams(
         &mut self,
         doc_id: DocId,
@@ -305,6 +310,8 @@ impl GramDex {
     }
 
     /// Insert Unicode-scalar trigrams for a document id.
+    ///
+    /// Repeated ids follow the additive contract of [`Self::add_document`].
     ///
     /// # Examples
     ///
