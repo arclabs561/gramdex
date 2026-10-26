@@ -95,8 +95,10 @@ after reopen:
 ```
 
 For measurement, `cargo run --release --features store --example store_reopen_diagnostics`
-prints the first snapshot-query cost with persisted `GramDex` sidecars present
-versus after deleting those sidecars and forcing source-segment rebuilds. The
+reopens a checkpointed store and prints the duration of its first snapshot
+query. It does this twice: once with the persisted `GramDex` sidecars present,
+and once after deleting those sidecars, which forces each segment to be
+rebuilt from its source text. The
 reported timings depend on the machine and filesystem; the command also prints
 document and sidecar counts, matching candidates, and whether the query document
 was recovered.
