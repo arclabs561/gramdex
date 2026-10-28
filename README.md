@@ -65,15 +65,16 @@ doc 0: shared=14, jaccard=0.341, text="vector quantization for nearest neighbor 
 
 ## Updatable index (`store` feature)
 
-`store::UpdatableIndex` wraps the index in a durable, segmented store
-([`segstore`](https://crates.io/crates/segstore)): incremental add/delete, a
-write-ahead log, checkpoint, compaction, and crash recovery, with the gram size
-`k` chosen at `open`. Per-segment indexes are cached and persisted as sidecars,
-so unchanged segments can load their built `GramDex` blocks after a restart
-instead of rebuilding them. Opt-in; the default build does not depend on
-segstore. `store::SnapshotIndex` opens the last checkpoint manifest and queries
-sidecars first, so source text batches are read only when a sidecar is missing
-or unusable. `candidates_min_shared`, `plan_candidates`, and
+`store::UpdatableIndex` stores the index in
+[`segstore`](https://crates.io/crates/segstore), with incremental adds and deletes,
+a write-ahead log, checkpoints, compaction, and crash recovery. Choose the gram
+size `k` when opening the store. Segment indexes are cached and saved in sidecar
+files when possible. Valid sidecars can be reused after a restart instead of
+rebuilding the indexes. The default build does not depend on segstore.
+
+`store::SnapshotIndex` opens the last checkpoint and queries sidecars first.
+It reads the source text only when a sidecar is missing or unusable.
+`candidates_min_shared`, `plan_candidates`, and
 `candidates_bounded` expose the same shared-gram pruning and broad-query bailout
 as the in-memory index for durable stores.
 
@@ -98,8 +99,8 @@ For measurement, `cargo run --release --features store --example store_reopen_di
 reopens a checkpointed store and prints the duration of its first snapshot
 query. It does this twice: once with the persisted `GramDex` sidecars present,
 and once after deleting those sidecars, which forces each segment to be
-rebuilt from its source text. The
-reported timings depend on the machine and filesystem; the command also prints
+rebuilt from its source text. Reported timings depend on the machine and
+filesystem; the command also prints
 document and sidecar counts, matching candidates, and whether the query document
 was recovered.
 
