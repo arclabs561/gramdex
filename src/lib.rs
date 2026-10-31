@@ -59,6 +59,11 @@ impl Default for PlannerConfig {
 
 /// Produce Unicode-scalar k-grams (sliding window over Rust `char`).
 ///
+/// Grams are not padded, so a string shorter than `k` produces none and a
+/// short word has few grams to share. This is not a complete edit-distance
+/// filter for short words: "house" and "horse" (edit distance 1) share no
+/// unpadded trigram. Use [`char_kgrams_padded`] when that matters.
+///
 /// # Examples
 ///
 /// ```
@@ -85,6 +90,9 @@ pub fn char_kgrams(text: &str, k: usize) -> Result<Vec<String>, Error> {
 
 /// Produce Unicode-scalar trigrams (a convenience wrapper over [`char_kgrams`]).
 ///
+/// Unpadded, so not a complete edit-distance filter for short words; see
+/// [`char_kgrams`] and [`char_trigrams_padded`].
+///
 /// # Examples
 ///
 /// ```
@@ -94,6 +102,47 @@ pub fn char_kgrams(text: &str, k: usize) -> Result<Vec<String>, Error> {
 pub fn char_trigrams(text: &str) -> Vec<String> {
     // k=3 is always valid; avoid exposing Result in the common case.
     char_kgrams(text, 3).expect("k=3 is valid")
+}
+
+/// Produce Unicode-scalar k-grams of `text` padded with `k - 1` copies of `#`
+/// before it and `k - 1` copies of `$` after it (Gravano et al., "Approximate
+/// String Joins in a Database (Almost) for Free", VLDB 2001).
+///
+/// Padding gives every character a gram at the word start and end, so short
+/// words that differ in the middle still share grams, and every input,
+/// including the empty string, yields at least `k - 1` grams when `k > 1`.
+/// Padded and unpadded grams differ; index and query with the same function.
+/// Text that itself contains `#` or `$` can only add shared grams, so the
+/// candidate set never loses a match because of it.
+///
+/// # Examples
+///
+/// ```
+/// let grams = gramdex::char_kgrams_padded("ab", 3).unwrap();
+/// assert_eq!(grams, vec!["##a", "#ab", "ab$", "b$$"]);
+/// ```
+pub fn char_kgrams_padded(text: &str, k: usize) -> Result<Vec<String>, Error> {
+    if k == 0 {
+        return Err(Error::InvalidK);
+    }
+    let mut padded = String::with_capacity(text.len() + 2 * (k - 1));
+    padded.extend(std::iter::repeat('#').take(k - 1));
+    padded.push_str(text);
+    padded.extend(std::iter::repeat('$').take(k - 1));
+    char_kgrams(&padded, k)
+}
+
+/// Produce padded Unicode-scalar trigrams (a convenience wrapper over
+/// [`char_kgrams_padded`]).
+///
+/// # Examples
+///
+/// ```
+/// let tris = gramdex::char_trigrams_padded("hi");
+/// assert_eq!(tris, vec!["##h", "#hi", "hi$", "i$$"]);
+/// ```
+pub fn char_trigrams_padded(text: &str) -> Vec<String> {
+    char_kgrams_padded(text, 3).expect("k=3 is valid")
 }
 
 fn char_trigram_tuples(text: &str) -> Vec<[char; 3]> {
@@ -326,6 +375,15 @@ impl GramDex {
         self.add_document(doc_id, &grams);
     }
 
+    /// Insert padded Unicode-scalar trigrams (see [`char_trigrams_padded`])
+    /// for a document id. Query with [`Self::candidates_union_trigrams_padded`].
+    ///
+    /// Repeated ids follow the additive contract of [`Self::add_document`].
+    pub fn add_document_trigrams_padded(&mut self, doc_id: DocId, text: &str) {
+        let grams = char_trigrams_padded(text);
+        self.add_document(doc_id, &grams);
+    }
+
     /// Number of indexed documents.
     pub fn num_docs(&self) -> u32 {
         self.docs.len() as u32
@@ -385,6 +443,10 @@ impl GramDex {
 
     /// Convenience: union candidates for Unicode-scalar trigrams of `text`.
     ///
+    /// Unpadded, so a short word with a one-character edit can miss: an index
+    /// holding "horse" returns nothing for "house". See
+    /// [`Self::candidates_union_trigrams_padded`].
+    ///
     /// # Examples
     ///
     /// ```
@@ -397,6 +459,21 @@ impl GramDex {
     /// ```
     pub fn candidates_union_trigrams(&self, text: &str) -> Vec<DocId> {
         let grams = char_trigrams(text);
+        self.candidates_union(&grams)
+    }
+
+    /// Convenience: union candidates for padded Unicode-scalar trigrams of
+    /// `text`, for an index built with [`Self::add_document_trigrams_padded`].
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// let mut ix = gramdex::GramDex::new();
+    /// ix.add_document_trigrams_padded(0, "horse");
+    /// assert_eq!(ix.candidates_union_trigrams_padded("house"), vec![0]);
+    /// ```
+    pub fn candidates_union_trigrams_padded(&self, text: &str) -> Vec<DocId> {
+        let grams = char_trigrams_padded(text);
         self.candidates_union(&grams)
     }
 
@@ -639,5 +716,27 @@ mod tests {
             ix2.candidates_union(&char_trigrams("hello"))
         );
         assert_eq!(ix1.df("hel"), 1);
+    }
+
+    #[test]
+    fn padded_trigrams_find_short_word_one_edit_away() {
+        let mut unpadded = GramDex::new();
+        unpadded.add_document_trigrams(0, "horse");
+        assert!(unpadded.candidates_union_trigrams("house").is_empty());
+
+        let mut padded = GramDex::new();
+        padded.add_document_trigrams_padded(0, "horse");
+        assert_eq!(padded.candidates_union_trigrams_padded("house"), vec![0]);
+    }
+
+    #[test]
+    fn padded_kgrams_shape() {
+        assert!(matches!(char_kgrams_padded("ab", 0), Err(Error::InvalidK)));
+        assert_eq!(
+            char_kgrams_padded("ab", 1).unwrap(),
+            char_kgrams("ab", 1).unwrap()
+        );
+        assert_eq!(char_kgrams_padded("", 3).unwrap(), vec!["##$", "#$$"]);
+        assert_eq!(char_trigrams_padded("é"), vec!["##é", "#é$", "é$$"]);
     }
 }
