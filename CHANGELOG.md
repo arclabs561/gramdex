@@ -14,6 +14,8 @@ These entries identify source changes without assigning a package release.
 
 ## [Unreleased]
 
+## [0.6.1] - 2026-10-30
+
 ### Fixed
 
 - `store::SnapshotIndex` no longer drops checkpointed documents after a
