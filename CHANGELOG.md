@@ -14,6 +14,18 @@ These entries identify source changes without assigning a package release.
 
 ## [Unreleased]
 
+### Added
+
+- Opt-in padded grams after Gravano et al. (2001): `char_kgrams_padded`,
+  `char_trigrams_padded`, `GramDex::add_document_trigrams_padded` and
+  `GramDex::candidates_union_trigrams_padded`. Text is padded with `k - 1`
+  copies of `#` before and `$` after, so short words one edit apart share
+  grams: an index of "horse" now returns it for "house" on the padded path.
+  Existing functions, their outputs and serialized data are unchanged.
+- Docs on `char_kgrams`, `char_trigrams` and
+  `GramDex::candidates_union_trigrams` state that unpadded grams are not a
+  complete edit-distance filter for short words.
+
 ## [0.6.1] - 2026-10-30
 
 ### Fixed
