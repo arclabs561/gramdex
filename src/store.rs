@@ -40,18 +40,32 @@ struct Cache {
 /// The `kind` tag for a persisted per-segment GramDex sidecar.
 const INDEX_KIND: &str = "gramdex";
 const SIDECAR_MAGIC: &[u8; 8] = b"GRDXIDX1";
-const SIDECAR_VERSION: u32 = 3;
+const SIDECAR_VERSION: u32 = 4;
 
+/// `ids` is the live set the index was built over, as seen by the writer that
+/// built it; `stored_ids` is every id stored in the segment, live or not. A
+/// writer can persist a sidecar for a live set newer than the last checkpoint
+/// (a WAL-only delete or re-add), so a checkpoint reader uses `stored_ids` to
+/// check that the index covers every id live in *its* view.
 #[derive(serde::Serialize)]
 struct GramSidecarRef<'a> {
     index: &'a GramDex,
     ids: Vec<u32>,
+    stored_ids: Vec<u32>,
 }
 
 #[derive(serde::Deserialize)]
 struct GramSidecar {
     index: GramDex,
     ids: Vec<u32>,
+    stored_ids: Vec<u32>,
+}
+
+fn stored_ids_vec(seg: &[(u32, String)]) -> Vec<u32> {
+    let mut ids: Vec<u32> = seg.iter().map(|(id, _)| *id).collect();
+    ids.sort_unstable();
+    ids.dedup();
+    ids
 }
 
 fn make_sidecar_recipe(k: usize) -> String {
@@ -498,6 +512,7 @@ impl UpdatableIndex {
         let sidecar = GramSidecarRef {
             index,
             ids: self.live_ids_vec(seg, seg_id),
+            stored_ids: stored_ids_vec(seg),
         };
         if let Ok(index_bytes) = postcard::to_allocvec(&sidecar) {
             let Some(bytes) = self.encode_sidecar(&index_bytes, seg_id) else {
@@ -561,8 +576,9 @@ impl UpdatableIndex {
 /// segstore manifest without decoding source segments, then drops sidecar
 /// candidates that are no longer live in their segment (tombstoned or re-added
 /// later) at query time. If a sidecar is missing,
-/// stale by recipe, or not decodable, only that one source segment is decoded to
-/// rebuild the sidecar.
+/// stale by recipe, not decodable, or missing a document that is live in this
+/// checkpoint (the writer built it after an uncheckpointed delete or re-add),
+/// only that one source segment is decoded to rebuild the sidecar.
 pub struct SnapshotIndex {
     catalog: SegmentCatalog<u32>,
     k: usize,
@@ -748,8 +764,18 @@ impl SnapshotIndex {
             .read_to_end(&mut bytes)
             .ok()?;
         let index_bytes = decode_sidecar(&self.sidecar_recipe, seg_id, &bytes)?;
-        let sidecar: GramSidecar = postcard::from_bytes(index_bytes).ok()?;
-        Some(sidecar.index)
+        let mut sidecar: GramSidecar = postcard::from_bytes(index_bytes).ok()?;
+        // The writer may have built this sidecar for a newer live set than the
+        // checkpoint (a WAL-only delete or re-add). Extra ids are fine: queries
+        // filter them per segment. A missing id that is live here would be a
+        // false negative, so such a sidecar is rejected and rebuilt.
+        sidecar.ids.sort_unstable();
+        let covers_checkpoint = sidecar
+            .stored_ids
+            .iter()
+            .filter(|id| self.catalog.is_live_in(seg_id, id))
+            .all(|id| sidecar.ids.binary_search(id).is_ok());
+        covers_checkpoint.then_some(sidecar.index)
     }
 
     fn build_live_index(&self, items: &[(u32, String)], seg_id: u64) -> Option<GramDex> {
@@ -760,6 +786,7 @@ impl SnapshotIndex {
         let sidecar = GramSidecarRef {
             index,
             ids: self.live_ids_vec(segment, seg_id),
+            stored_ids: stored_ids_vec(segment),
         };
         if let Ok(index_bytes) = postcard::to_allocvec(&sidecar) {
             let Some(bytes) = encode_sidecar(&self.sidecar_recipe, seg_id, &index_bytes) else {

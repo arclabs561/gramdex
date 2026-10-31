@@ -14,6 +14,16 @@ These entries identify source changes without assigning a package release.
 
 ## [Unreleased]
 
+### Fixed
+
+- `store::SnapshotIndex` no longer drops checkpointed documents after a
+  writer deletes or re-adds them without a checkpoint. `UpdatableIndex`
+  persists per-segment sidecars at query time, so a sidecar can describe a
+  newer live set than the checkpoint; the snapshot now rejects and rebuilds a
+  sidecar that lacks any document live in its checkpoint. Sidecars move to
+  format version 4 (they also record every id stored in the segment); older
+  sidecars are rebuilt from their source segment on first use.
+
 ## [0.6.0] - 2026-10-12
 
 ### Changed
