@@ -44,6 +44,8 @@ assert_eq!(verified, vec![2]);
 - **Candidate index**: `GramDex` (union candidates, scored candidates, bailout planning)
 - **Verification**: `trigram_jaccard`
 
+Grams are built from Unicode scalar values (`char`), not bytes.
+
 ## Example
 
 ```sh
@@ -57,11 +59,6 @@ query: "nearest neighbor"
 doc 3: shared=13, jaccard=0.394, text="nearest neighbour spelling variant"
 doc 0: shared=14, jaccard=0.341, text="vector quantization for nearest neighbor search"
 ```
-
-## Design notes
-
-- This crate focuses on **candidate generation**; you bring your own verification policy.
-- Offsets/spans are naturally expressed in **Unicode scalar values** (`char` count), not bytes.
 
 ## Updatable index (`store` feature)
 
@@ -99,10 +96,8 @@ For measurement, `cargo run --release --features store --example store_reopen_di
 reopens a checkpointed store and prints the duration of its first snapshot
 query. It does this twice: once with the persisted `GramDex` sidecars present,
 and once after deleting those sidecars, which forces each segment to be
-rebuilt from its source text. Reported timings depend on the machine and
-filesystem; the command also prints
-document and sidecar counts, matching candidates, and whether the query document
-was recovered.
+rebuilt from its source text. Timings depend on the machine and filesystem and
+are omitted below.
 
 ```text
 documents: 1000, flush threshold: 200, k-grams: 3
