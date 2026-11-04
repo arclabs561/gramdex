@@ -14,6 +14,8 @@ These entries identify source changes without assigning a package release.
 
 ## [Unreleased]
 
+## [0.6.2] - 2026-11-04
+
 ### Added
 
 - Opt-in padded grams after Gravano et al. (2001): `char_kgrams_padded`,
