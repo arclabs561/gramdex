@@ -68,6 +68,15 @@ fn stored_ids_vec(seg: &[(u32, String)]) -> Vec<u32> {
     ids
 }
 
+fn check_k(k: usize) -> PersistenceResult<()> {
+    if k == 0 {
+        return Err(durability::PersistenceError::InvalidConfig(
+            crate::Error::InvalidK.to_string(),
+        ));
+    }
+    Ok(())
+}
+
 fn make_sidecar_recipe(k: usize) -> String {
     format!("gramdex-store-v1;codec=postcard-gramdex-v1;k={k}")
 }
@@ -177,12 +186,14 @@ pub struct UpdatableIndex {
 impl UpdatableIndex {
     /// Open (or recover) an index under `dir` that matches on character `k`-grams
     /// (`k = 3` for trigrams). Up to `flush_threshold` documents are buffered
-    /// before a new immutable segment is sealed.
+    /// before a new immutable segment is sealed. `k = 0` is an
+    /// `InvalidConfig` error, as [`crate::char_kgrams`] rejects it.
     pub fn open(
         dir: Arc<dyn Directory>,
         flush_threshold: usize,
         k: usize,
     ) -> PersistenceResult<Self> {
+        check_k(k)?;
         Ok(Self {
             inner: SegmentedStore::open(dir, GramBacking::new(), flush_threshold)?,
             k,
@@ -591,8 +602,9 @@ impl SnapshotIndex {
     ///
     /// WAL records after the last checkpoint are intentionally not visible;
     /// checkpoint before opening a snapshot when newly added documents must be
-    /// searchable through this path.
+    /// searchable through this path. `k = 0` is an `InvalidConfig` error.
     pub fn open(dir: Arc<dyn Directory>, k: usize) -> PersistenceResult<Self> {
+        check_k(k)?;
         Ok(Self {
             catalog: SegmentCatalog::open(dir)?,
             k,
