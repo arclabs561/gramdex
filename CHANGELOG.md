@@ -25,6 +25,16 @@ These entries identify source changes without assigning a package release.
 - Docs on `char_kgrams`, `char_trigrams` and
   `GramDex::candidates_union_trigrams` state that unpadded grams are not a
   complete edit-distance filter for short words.
+- `GramDex::plan_candidates_union` docs state that a query with no grams
+  returns `Candidates([])`, not `ScanAll`, and point short words to the
+  padded functions.
+
+### Fixed
+
+- `store::UpdatableIndex::open` and `store::SnapshotIndex::open` reject
+  `k = 0` with `PersistenceError::InvalidConfig`. Previously they accepted
+  it, every document was skipped (`char_kgrams` rejects `k = 0`), and every
+  query returned no candidates without an error.
 
 ## [0.6.1] - 2026-10-30
 

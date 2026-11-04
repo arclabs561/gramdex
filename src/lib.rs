@@ -550,6 +550,10 @@ impl GramDex {
     /// \( \sum_g df(g) \)), which avoids false `ScanAll` decisions when grams
     /// overlap heavily. It is slightly more work than a pure `df`-based bound,
     /// but it reuses the work needed to produce the final candidate set.
+    ///
+    /// A query with no grams returns `Candidates([])`, not `ScanAll`. Unpadded
+    /// text shorter than `k` has no grams, so it matches nothing here; use the
+    /// padded functions (such as [`char_trigrams_padded`]) for short words.
     pub fn plan_candidates_union(
         &self,
         query_grams: &[String],
