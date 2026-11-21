@@ -20,6 +20,8 @@ evidence; use `cargo bench` for measurement.
 
 ```sh
 cargo run --release --example candidate_verify_rank
+# One UTF-8 document per line. Document IDs are zero-based line numbers.
+cargo run --release --example candidate_verify_rank -- "nearest neighbor" passages.txt
 ```
 
 ## Feature-gated examples

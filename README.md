@@ -69,6 +69,14 @@ doc 3: shared=13, jaccard=0.394, text="nearest neighbour spelling variant"
 doc 0: shared=14, jaccard=0.341, text="vector quantization for nearest neighbor search"
 ```
 
+To search a file of your own, put one document per line. A result’s ID is its
+zero-based line number. The example keeps candidates with trigram Jaccard
+similarity of at least 0.10.
+
+```sh
+cargo run --example candidate_verify_rank -- "nearest neighbor" passages.txt
+```
+
 ## Updatable index (`store` feature)
 
 `store::UpdatableIndex` stores the index in
