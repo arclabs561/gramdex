@@ -15,8 +15,17 @@ or application-specific similarity check before presenting results.
 gramdex = "0.6"
 ```
 
-The default build supports Rust 1.80. The optional `store` feature requires
-Rust 1.83 with current dependencies.
+The default build supports Rust 1.80. The optional `store` feature supports
+Rust 1.83 with compatible dependencies.
+
+Cargo 1.83 can select dependencies that need a newer compiler. From a fresh
+checkout, resolve for the declared Rust version, then check with the old toolchain:
+
+```sh
+rustup toolchain install 1.85.0 1.83.0 --profile minimal
+CARGO_RESOLVER_INCOMPATIBLE_RUST_VERSIONS=fallback cargo +1.85.0 generate-lockfile
+cargo +1.83.0 check --locked --lib --features store
+```
 
 ```rust
 use gramdex::{GramDex, trigram_jaccard};
