@@ -63,6 +63,14 @@ jobs:
       - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # v1
         with:
           toolchain: ${{ matrix.rust }}
+      - name: Check fresh consumer on Rust 1.83.0
+        if: matrix.rust == '1.83.0'
+        run: |
+          consumer="$RUNNER_TEMP/consumer"
+          cargo +1.83.0 new --lib "$consumer"
+          cd "$consumer"
+          cargo +1.83.0 add gramdex --path "$GITHUB_WORKSPACE" --features store
+          cargo +1.83.0 check
       - name: Resolve dependencies for the declared Rust version
         env:
           CARGO_RESOLVER_INCOMPATIBLE_RUST_VERSIONS: fallback
